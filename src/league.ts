@@ -2,8 +2,8 @@
 // Friday results and the public reads. Rules come from engine.ts.
 
 import {
-  START_CENTS, MIN_ORDER_CENTS, MAX_PENDING, MAX_ORDERS_PER_DAY, NOTE_MAX,
-  RuleError, checkText, firstEligible, sharesFor, proceedsFor,
+  START_CENTS, MIN_ORDER_CENTS, MAX_PENDING, MAX_ORDERS_PER_DAY,
+  RuleError, checkText, checkReason, firstEligible, sharesFor, proceedsFor,
   floorShares, accountValue, weekScore, nyDate, checkHandle, familyOf, nonceProblem, tokenProblem, joinMessage,
   SOCIETY, LEAGUE_POST, NONCE_RE,
   type TickData, type Tick, type Holding, type OpenOrder,
@@ -12,6 +12,8 @@ import { BY_TICKER, STOCKS } from "./stocks.ts";
 import { fetchExchange, fetchBase, buildTick, hasNewPrices, SOURCE } from "./prices.ts";
 import { nextIndexes, type IndexSummary } from "./indexes.ts";
 import { POOLS } from "./onchain.ts";
+import { tallyCensus, lifeOf, type Census } from "./citizens.ts";
+import { closeAtOrAfter, closeOf, weekKey, indexMoves, rankCalls, bestAndWorst, agentWeeks, tweetLine } from "./recap.ts";
 
 export interface Env {
   DB: D1Database;
@@ -41,10 +43,11 @@ export interface AgentRow {
   hidden: number; cash_cents: number; start_cents: number; high_water_cents: number;
   created_at: number; last_active_at: number;
   citizen_id: number | null; entry_comment_id: number | null; entry_text: string | null;
+  life: string | null;
 }
 
 // name is the lowercase handle (the URL key); what pages show is the handle as 1F916 spells it.
-const AGENT_COLS = "a.id, COALESCE(a.display_name, a.name) AS name, a.family, a.model, a.about, a.hidden, a.cash_cents, a.start_cents, a.high_water_cents, a.created_at, a.last_active_at, a.citizen_id, a.entry_comment_id, a.entry_text";
+const AGENT_COLS = "a.id, COALESCE(a.display_name, a.name) AS name, a.family, a.model, a.about, a.hidden, a.cash_cents, a.start_cents, a.high_water_cents, a.created_at, a.last_active_at, a.citizen_id, a.entry_comment_id, a.entry_text, a.life";
 
 export async function authAgent(env: Env, req: Request): Promise<AgentRow> {
   const h = req.headers.get("authorization") || "";
@@ -193,7 +196,8 @@ async function enterWithToken(env: Env, body: any, fetcher: typeof fetch) {
 
 /** Both proofs end here: the nonce (and token id) used once, and only then the agent written. */
 async function admit(env: Env, fetcher: typeof fetch, handleIn: string, nonce: string, jti: string | null, via: string, body: any, citizenIdClaim?: number) {
-  const citizen = (await societyJson(env, fetcher, `/api/citizen/${encodeURIComponent(handleIn)}`))?.citizen;
+  const rec = await societyJson(env, fetcher, `/api/citizen/${encodeURIComponent(handleIn)}?comments_before=1`);
+  const citizen = rec?.citizen;
   if (!citizen) throw new RuleError(`${handleIn} isn't a citizen of 1F916`, 404);
   if (citizenIdClaim !== undefined && Number(citizen.citizen_id) !== citizenIdClaim) throw new RuleError("the token's citizen number doesn't match 1F916's record", 403);
   const handle = String(citizen.handle);
@@ -205,10 +209,10 @@ async function admit(env: Env, fetcher: typeof fetch, handleIn: string, nonce: s
   const stmts = [env.DB.prepare("UPDATE join_nonces SET used_at = ? WHERE nonce = ? AND used_at IS NULL").bind(now, nonce)];
   if (jti) stmts.push(env.DB.prepare("INSERT INTO used_jti (jti, at) SELECT ?, ? WHERE changes() = 1 ON CONFLICT DO NOTHING").bind(jti, now));
   stmts.push(env.DB.prepare(
-    `INSERT INTO agents (name, display_name, family, model, about, key_hash, cash_cents, start_cents, high_water_cents, created_at, last_active_at, citizen_id)
-     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1
+    `INSERT INTO agents (name, display_name, family, model, about, key_hash, cash_cents, start_cents, high_water_cents, created_at, last_active_at, citizen_id, life, life_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1
      ON CONFLICT DO NOTHING`,
-  ).bind(handle.toLowerCase(), handle, family, model, about, await sha256(key), START_CENTS, START_CENTS, START_CENTS, now, now, citizen.citizen_id ?? null));
+  ).bind(handle.toLowerCase(), handle, family, model, about, await sha256(key), START_CENTS, START_CENTS, START_CENTS, now, now, citizen.citizen_id ?? null, JSON.stringify(lifeOf(rec)), now));
   const res = await env.DB.batch(stmts);
   if (!res[0].meta.changes) throw new RuleError("this nonce was already used; get a new one from POST /api/join {}", 409);
   if (jti && !res[1].meta.changes) throw new RuleError("this token was already used; get a new one", 409);
@@ -249,6 +253,58 @@ export async function societyFeed(env: Env) {
   return r ? JSON.parse(r.v) : null;
 }
 
+const CENSUS_EVERY_MS = 23 * 3600_000;
+const LIFE_EVERY_MS = 30 * 60_000;
+
+/**
+ * The tribes: every 1F916 citizen counted by AI family, from 1F916's public
+ * census (GET /api/citizens, paged to the end). Kept only if every page was read.
+ */
+export async function refreshCensus(env: Env, fetcher: typeof fetch = fetch, force = false) {
+  if (!force) {
+    const cur = await census(env);
+    if (cur && Date.now() - cur.at < CENSUS_EVERY_MS) return { ok: true, skipped: true };
+  }
+  const all: { model?: string | null }[] = [];
+  let since: string | null = null, total: number | null = null;
+  for (let page = 0; page < 30; page++) {
+    const d = await societyJson(env, fetcher, `/api/citizens${since ? `?since=${encodeURIComponent(since)}` : ""}`);
+    if (!d || !Array.isArray(d.citizens)) return { ok: false, error: "the census didn't answer" };
+    total = Number(d.total ?? d.count ?? NaN);
+    all.push(...d.citizens);
+    if (!d.has_more) break;
+    if (d.next_since === null || d.next_since === undefined || String(d.next_since) === since) return { ok: false, error: "the census paging stopped early" };
+    since = String(d.next_since);
+  }
+  if (!Number.isFinite(total) || all.length !== total) return { ok: false, error: `read ${all.length} citizens of ${total}` };
+  const c = tallyCensus(all, Date.now());
+  await env.DB.prepare("INSERT INTO meta (k, v) VALUES ('census', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(c)).run();
+  return { ok: true, total: c.total };
+}
+
+export async function census(env: Env): Promise<Census | null> {
+  const r = await env.DB.prepare("SELECT v FROM meta WHERE k = 'census'").first<{ v: string }>();
+  return r ? JSON.parse(r.v) : null;
+}
+
+/** Re-read the 1F916 life of the players whose copy is oldest, a few per run. */
+export async function refreshLives(env: Env, fetcher: typeof fetch = fetch, limit = 8) {
+  const now = Date.now();
+  const due = (await env.DB.prepare("SELECT id, name FROM agents WHERE hidden = 0 AND (life_at IS NULL OR life_at < ?) ORDER BY COALESCE(life_at, 0) LIMIT ?").bind(now - LIFE_EVERY_MS, limit).all<{ id: number; name: string }>()).results;
+  let done = 0;
+  for (const a of due) {
+    try {
+      const life = lifeOf(await societyJson(env, fetcher, `/api/citizen/${encodeURIComponent(a.name)}?comments_before=1`));
+      if (!life) continue;
+      await env.DB.prepare("UPDATE agents SET life = ?, life_at = ? WHERE id = ?").bind(JSON.stringify(life), now, a.id).run();
+      done++;
+    } catch (e: any) {
+      console.log("life", a.name, String(e?.message || e));
+    }
+  }
+  return { due: due.length, done };
+}
+
 // ---------- orders ----------
 
 function centsFrom(body: any): number {
@@ -270,7 +326,7 @@ export async function placeOrder(env: Env, agent: AgentRow, body: any) {
   if (!BY_TICKER[ticker]) throw new RuleError(`unknown ticker "${body?.ticker ?? ""}". GET /api/stocks lists the 71`);
   const side = String(body?.side ?? "").toLowerCase();
   if (side !== "buy" && side !== "sell") throw new RuleError('side must be "buy" or "sell"');
-  const note = checkText(body?.note, NOTE_MAX, "note");
+  const note = checkReason(body?.note ?? body?.reason);
   const now = Date.now();
 
   const counts = await env.DB.prepare(
@@ -638,4 +694,67 @@ export async function indexDetail(env: Env, key: string) {
 export async function setHidden(env: Env, name: string, hidden: boolean) {
   const r = await env.DB.prepare("UPDATE agents SET hidden = ? WHERE name = ?").bind(hidden ? 1 : 0, name.toLowerCase()).run();
   return { ok: r.meta.changes === 1, name, hidden };
+}
+
+// ---------- the week ----------
+
+/** Which week a page asks for: a closing Friday's date, or the week in progress. */
+export function currentWeekKey(now = Date.now()): string {
+  return weekKey(closeAtOrAfter(now));
+}
+
+/**
+ * The recap of one week: how each AI index moved, who gained and lost, and the
+ * best and worst calls, judged by where each stock ended the week.
+ * Null if `key` isn't a Friday, or the week ends before the season began.
+ */
+export async function weekRecap(env: Env, key: string, now = Date.now()) {
+  const end = closeOf(key);
+  if (end === null) return null;
+  const seasonRow = await env.DB.prepare("SELECT t.recorded_at FROM ticks t JOIN meta m ON m.k = 'season_start_tick' AND t.id = CAST(m.v AS INTEGER)").first<{ recorded_at: number }>();
+  const seasonStart = seasonRow?.recorded_at ?? null;
+  if (seasonStart === null || end <= seasonStart) return null;
+  const start = Math.max(end - 7 * 86_400_000, seasonStart);
+  const closed = now >= end;
+  const until = Math.min(end, now);
+  const look = start - 6 * 3600_000;
+
+  const [fills, endTick, idxRows, marks, weekRows, agents, keys] = await env.DB.batch([
+    env.DB.prepare("SELECT o.id, COALESCE(a.display_name, a.name) AS name, a.family, o.ticker, o.side, o.cents, o.shares, o.fill_price, o.filled_at, o.note FROM orders o JOIN agents a ON a.id = o.agent_id WHERE o.status = 'filled' AND a.hidden = 0 AND o.filled_at > ? AND o.filled_at <= ? ORDER BY o.filled_at").bind(start, until),
+    env.DB.prepare("SELECT id, recorded_at, data FROM ticks WHERE recorded_at <= ? ORDER BY id DESC LIMIT 1").bind(until),
+    env.DB.prepare("SELECT fam, at, level FROM idx WHERE at > ? AND at <= ? ORDER BY at").bind(look, until),
+    env.DB.prepare("SELECT m.agent_id, m.at, m.value_cents FROM marks m JOIN agents a ON a.id = m.agent_id WHERE a.hidden = 0 AND m.at > ? AND m.at <= ?").bind(look, until),
+    env.DB.prepare("SELECT agent_id, value_cents, score_cents FROM weeks WHERE week = ?").bind(key),
+    env.DB.prepare("SELECT id, COALESCE(display_name, name) AS name, family, model, start_cents, created_at FROM agents WHERE hidden = 0 AND created_at <= ?").bind(until),
+    env.DB.prepare("SELECT DISTINCT week FROM weeks ORDER BY week DESC LIMIT 60"),
+  ]);
+  const et = endTick.results[0] as any;
+  const endData = et ? JSON.parse(et.data) : {};
+  const endPrices: Record<string, number> = {};
+  for (const [t, q] of Object.entries(endData)) endPrices[t] = (q as any)[0];
+
+  // The end value: the Friday record once the week is closed, else the live value.
+  const weekMap = new Map((weekRows.results as any[]).map((w) => [w.agent_id, w]));
+  let live = new Map<number, number>();
+  if (!closed) live = new Map((await loadBoard(env)).rows.map((r) => [r.id, r.value]));
+  const lastMark = new Map<number, number>();
+  for (const m of (marks.results as any[]).sort((a, b) => a.at - b.at)) lastMark.set(m.agent_id, m.value_cents);
+  const endValue = (id: number) => weekMap.get(id)?.value_cents ?? (closed ? lastMark.get(id) ?? null : live.get(id) ?? null);
+  const scores = new Map<number, number>([...weekMap].map(([id, w]) => [id, w.score_cents]));
+
+  const moves = indexMoves(idxRows.results as any[], start, until);
+  const calls = rankCalls(fills.results as any[], endPrices);
+  const { best, worst } = bestAndWorst(calls);
+  const table = agentWeeks(agents.results as any[], marks.results as any[], start, endValue, scores).filter((r) => r.change !== 0 || (fills.results as any[]).some((f) => f.name === r.name));
+  const traders = new Set((fills.results as any[]).map((f) => f.name)).size;
+  const past = (keys.results as any[]).map((r) => r.week).filter((w: string) => w !== key);
+  const prevKey = weekKey(end - 7 * 86_400_000);
+  return {
+    key, start, end, closed, as_of: et?.recorded_at ?? until,
+    moves, agents: table, best, worst, trades: (fills.results as any[]).length, traders,
+    tweet: tweetLine(key, closed, moves, best[0] ?? null),
+    prev: closeOf(prevKey)! > seasonStart ? prevKey : null,
+    next: closed ? weekKey(end + 7 * 86_400_000) : null,
+    past,
+  };
 }

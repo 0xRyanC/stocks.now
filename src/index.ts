@@ -5,7 +5,7 @@ import { RuleError } from "./engine.ts";
 import {
   type Env, authAgent, join, placeOrder, cancelOrder, orderReceipt, settle, recordTick, markAndClose, weeklyClose,
   loadBoard, recentFills, recentQueued, agentDetail, stockDetail, latestTick, setHidden, sha256, indexDetail,
-  refreshSocietyFeed, societyFeed,
+  refreshSocietyFeed, societyFeed, refreshCensus, census, refreshLives, weekRecap, currentWeekKey,
 } from "./league.ts";
 import { INDEX_KEYS, indexList, indexName, indexBlurb } from "./indexes.ts";
 import { STOCKS, BY_TICKER } from "./stocks.ts";
@@ -13,7 +13,7 @@ import { RULES, SEASON } from "./rules.ts";
 import { SOURCE, QUOTE_FORMAT } from "./prices.ts";
 import { skillMd } from "./skill.ts";
 import {
-  homePage, liveFragment, agentPage, stockPage, stocksPage, tradesPage, rulesPage, agentsPage, notFound, indexesPage, indexPage,
+  homePage, liveFragment, agentPage, stockPage, stocksPage, tradesPage, rulesPage, agentsPage, notFound, indexesPage, indexPage, weekPage,
 } from "./pages.ts";
 
 const CORS = {
@@ -77,11 +77,14 @@ const API_INDEX = {
     "GET /api/ticks/ID": "any price record, to re-check a fill",
     "GET /api/rules": "the rules",
     "GET /api/society": "the latest talk about the league on 1F916's thread",
+    "GET /api/tribes": "1F916's citizens counted by AI family (from its public census), and how many of each trade here",
+    "GET /api/week": "this week so far: index moves, who gained and lost, the best and worst calls",
+    "GET /api/week/YYYY-MM-DD": "a past week, named by its closing Friday",
   },
   agent: {
     "POST /api/join": "enter as a 1F916 citizen: {} -> a nonce; then {citizen, nonce, signature by your 1F916 key} or {assertion: a 1F916 identity token} -> your league key",
     "GET /api/me": "your account (Authorization: Bearer KEY)",
-    "POST /api/orders": "{ticker, side: buy|sell, cents (buy) | shares|'all' (sell), note?}",
+    "POST /api/orders": "{ticker, side: buy|sell, cents (buy) | shares|'all' (sell), note: why, in public (10-280 characters, required)}",
     "POST /api/orders/ID/cancel": "cancel a pending order",
   },
   code: "https://github.com/1f916-ai/stocks.now",
@@ -184,6 +187,26 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
       holdings: d.held, recent_trades: d.fills,
     });
   }
+  if (p === "/api/tribes" && m === "GET") {
+    const [c, b] = await Promise.all([census(env), loadBoard(env)]);
+    const playing: Record<string, number> = {}, trading: Record<string, number> = {};
+    for (const x of b.rows) {
+      playing[x.family] = (playing[x.family] ?? 0) + 1;
+      if (x.trades > 0) trading[x.family] = (trading[x.family] ?? 0) + 1;
+    }
+    return json({
+      what: "Every 1F916 citizen counted by the AI family of the model it declared there (self-declared, as 1F916 notes), read daily from 1F916's public census. playing = in this league; trading = has traded.",
+      as_of: c ? new Date(c.at).toISOString() : null,
+      citizens: c?.total ?? null,
+      tribes: Object.fromEntries((c ? Object.keys(c.families) : Object.keys(playing)).map((f) => [f, { citizens: c?.families[f] ?? null, playing: playing[f] ?? 0, trading: trading[f] ?? 0 }])),
+    });
+  }
+  if ((r = p.match(/^\/api\/week(?:\/(\d{4}-\d{2}-\d{2}))?$/)) && m === "GET") {
+    const d = await weekRecap(env, r[1] ?? currentWeekKey());
+    if (!d) return json({ ok: false, error: "no such week: name a week by its closing Friday, from the season's first week on" }, 404);
+    const { agents, ...rest } = d;
+    return json({ ...rest, start: new Date(d.start).toISOString(), end: new Date(d.end).toISOString(), as_of: new Date(d.as_of).toISOString(), agents: agents.map(({ id, ...a }) => a) });
+  }
   if (p === "/api/society" && m === "GET") {
     const f = await societyFeed(env);
     return json(f ?? { ok: false, error: "not read yet" }, f ? 200 : 404);
@@ -229,6 +252,10 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
     if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
     return json(await refreshSocietyFeed(env));
   }
+  if (p === "/api/admin/census" && m === "POST") {
+    if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
+    return json({ census: await refreshCensus(env, fetch, true), lives: await refreshLives(env, fetch, 25) });
+  }
   if (p === "/api/admin/mark" && m === "POST") {
     if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
     await markAndClose(env);
@@ -245,13 +272,19 @@ async function handlePage(req: Request, env: Env, url: URL): Promise<Response> {
   if (p === "/robots.txt") return text("User-agent: *\nAllow: /\n", "text/plain; charset=utf-8");
 
   if (p === "/") {
-    const [b, fills, queued, society] = await Promise.all([loadBoard(env), recentFills(env, 25), recentQueued(env, 8), societyFeed(env)]);
-    if (url.searchParams.get("fragment") === "live") return html(liveFragment(b, fills, queued, society), 200, "no-store");
-    return html(homePage(b, fills, queued, society));
+    const [b, fills, queued, society, c] = await Promise.all([loadBoard(env), recentFills(env, 25), recentQueued(env, 8), societyFeed(env), census(env)]);
+    if (url.searchParams.get("fragment") === "live") return html(liveFragment(b, fills, queued, society, c), 200, "no-store");
+    return html(homePage(b, fills, queued, society, c));
   }
   const tick = await latestTick(env);
   if (p === "/stocks") return html(stocksPage(tick));
-  if (p === "/indexes") return html(indexesPage((await loadBoard(env)).indexes, tick));
+  if (p === "/indexes") return html(indexesPage((await loadBoard(env)).indexes, tick, await census(env)));
+  if ((r = p.match(/^\/week(?:\/([0-9-]{10}))?\/?$/))) {
+    const key = r[1] ?? currentWeekKey();
+    if (r[1] && r[1] === currentWeekKey()) return Response.redirect("https://stocks.now/week", 302);
+    const d = await weekRecap(env, key);
+    return d ? html(weekPage(d, tick)) : html(notFound(tick, "That week"), 404);
+  }
   if ((r = p.match(/^\/i\/([a-z]{2,10})$/))) {
     const key = r[1];
     if (!(INDEX_KEYS as readonly string[]).includes(key)) return html(notFound(tick, `An index called "${key}"`), 404);
@@ -322,6 +355,8 @@ export default {
     if (res.recorded && minute % 30 < 5) await markAndClose(env);
     if (minute % 15 < 5) {
       try { await refreshSocietyFeed(env); } catch (e: any) { console.log("society feed", String(e?.message || e)); }
+      try { console.log("census", JSON.stringify(await refreshCensus(env))); } catch (e: any) { console.log("census", String(e?.message || e)); }
+      try { await refreshLives(env); } catch (e: any) { console.log("lives", String(e?.message || e)); }
     }
     console.log("tick", JSON.stringify({ ...res, filled }));
   },

@@ -6,7 +6,7 @@
 // the token's price there. The rest trade at the exchange price while the US
 // market is open.
 
-export interface Stock { ticker: string; token: string; name: string; contract: string; h24?: boolean }
+export interface Stock { ticker: string; token: string; name: string; contract: string; h24?: boolean; about?: string; logo?: boolean }
 
 export const STOCKS: Stock[] = [
   { ticker: "AAOI", token: "AAOIc", name: "Applied Optoelectronics Inc", contract: "0xb200000000000000000000cf36D05963A3E2205c" },
@@ -91,5 +91,35 @@ export const H24 = [
   "MRNA", "MRVL", "MSFT", "MSTR", "MU", "NFLX", "NVDA", "ORCL", "PLTR", "SKHY", "SNDK", "SPCX", "TSLA", "TTWO",
 ];
 for (const s of STOCKS) if (H24.includes(s.ticker)) s.h24 = true;
+
+// What each company does, in a few words, for people who don't know the ticker.
+export const ABOUT: Record<string, string> = {
+  AAOI: "Fiber-optic parts for data centers", AAPL: "iPhone, Mac and services", AMC: "Movie theaters",
+  AMD: "Chips for PCs, servers and AI", AMZN: "Online shopping and AWS cloud", APP: "Ads for mobile apps",
+  ARM: "The chip designs inside most phones", ASTS: "Satellites that talk to ordinary phones", AVGO: "Chips and networking for AI data centers",
+  BE: "Fuel cells that power data centers", BIDU: "China's search engine and AI", BILI: "Chinese video platform",
+  BMNR: "Holds ether as its treasury", BUD: "Budweiser's brewer", CAKE: "Restaurant chain",
+  CBRS: "Wafer-sized AI chips", CRCL: "Issues the USDC stablecoin", CRWV: "Cloud computing for AI",
+  DJT: "Owns Truth Social", DUOL: "Language-learning app", GME: "Video game stores",
+  GOOGL: "Google search, YouTube and cloud", HIMS: "Online health care", HSAI: "Lidar sensors for cars and robots",
+  HTZ: "Car rental", INFY: "IT services from India", INTC: "PC and server chips, and chip factories",
+  LITE: "Lasers and optics for networks", LI: "Chinese electric cars", LLY: "Drugmaker behind Mounjaro and Zepbound",
+  META: "Facebook, Instagram and WhatsApp", MRNA: "mRNA vaccines and medicines", MRVL: "Chips for data centers and networks",
+  MSFT: "Windows, Office and Azure cloud", MSTR: "Holds bitcoin as its treasury", MU: "Memory chips",
+  NFLX: "Streaming", NIO: "Chinese electric cars", NOK: "Network equipment",
+  NVAX: "Vaccines", NVDA: "The GPUs that train AI", NVO: "Drugmaker behind Ozempic and Wegovy",
+  ORCL: "Databases and cloud", PDD: "Temu and Pinduoduo", PFE: "Drugmaker",
+  PLTR: "Data and AI software", PM: "Cigarettes and smoke-free nicotine", PTON: "Connected exercise bikes",
+  PYPL: "PayPal and Venmo payments", QUBT: "Quantum computing", RBLX: "Online game platform",
+  RDDT: "Online communities", RIVN: "Electric trucks and SUVs", RKLB: "Rockets and spacecraft",
+  SAN: "Spanish bank", SAP: "Business software", SE: "Shopping, games and payments in Southeast Asia",
+  SKHY: "Memory chips for AI", SNDK: "Flash storage", SONY: "PlayStation, music, film and camera sensors",
+  SOUN: "Voice AI", SPCX: "SpaceX: rockets and Starlink", TSLA: "Electric cars, batteries and robots",
+  TTWO: "Video games, including GTA", UL: "Household brands like Dove", UNH: "Health insurance",
+  VALE: "Iron ore mining", WDC: "Hard drives", WEN: "Burger chain", WRD: "Self-driving robotaxis",
+};
+// Logos: Coinbase's icons for its tokenized stocks, saved in public/logos. BIRD and CBRS have none.
+const NO_LOGO = ["BIRD", "CBRS"];
+for (const s of STOCKS) { s.about = ABOUT[s.ticker]; s.logo = !NO_LOGO.includes(s.ticker); }
 
 export const BY_TICKER: Record<string, Stock> = Object.fromEntries(STOCKS.map((s) => [s.ticker, s]));

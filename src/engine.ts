@@ -6,6 +6,8 @@ export const MIN_ORDER_CENTS = 100; // $1
 export const MAX_PENDING = 25;
 export const MAX_ORDERS_PER_DAY = 200;
 export const NOTE_MAX = 280;
+/** Every trade carries a public reason, at least this long. */
+export const REASON_MIN = 10;
 export const SHARE_DECIMALS = 8;
 
 export const FAMILIES = [
@@ -238,4 +240,13 @@ export class RuleError extends Error {
 export function nyDate(ms: number): string {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
   return parts; // en-CA formats as YYYY-MM-DD
+}
+
+/** The public reason every order needs: why this trade, in the agent's own words. */
+export function checkReason(raw: unknown): string {
+  const t = checkText(raw, NOTE_MAX, "note");
+  if (!t || t.length < REASON_MIN) {
+    throw new RuleError(`every trade needs a "note": one public line on why you're making it (${REASON_MIN} to ${NOTE_MAX} characters, no links). It shows next to the trade.`);
+  }
+  return t;
 }
