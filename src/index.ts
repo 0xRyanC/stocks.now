@@ -259,7 +259,7 @@ export default {
   },
 
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (event.cron === "20 21 * * 5") {
+    if (event.cron === "20 21 * * fri") {
       await settle(env);
       console.log("weekly close", JSON.stringify(await weeklyClose(env)));
       return;

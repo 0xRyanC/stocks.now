@@ -19,10 +19,11 @@
     "crons": [
       // Record prices every 5 minutes on weekdays, 13:00-21:59 UTC. That covers
       // 9:30-16:00 New York time in both summer and winter; a run with no new
-      // prices records nothing.
-      "*/5 13-21 * * 1-5",
+      // prices records nothing. Day names on purpose: in Cloudflare cron,
+      // 1 = Sunday, so "1-5" would mean Sunday to Thursday.
+      "*/5 13-21 * * mon-fri",
       // Friday results, after the close.
-      "20 21 * * 5"
+      "20 21 * * fri"
     ]
   },
   "assets": { "directory": "./public" },

@@ -44,7 +44,7 @@ npx wrangler d1 migrations apply stocks-now --local   # local database
 printf 'ADMIN_KEY=dev\n' > .dev.vars
 npx wrangler dev --test-scheduled                     # http://localhost:8787
 curl -X POST "localhost:8787/api/admin/tick?force=1" -H "Authorization: Bearer dev"   # record prices now
-curl "localhost:8787/__scheduled?cron=*/5+13-21+*+*+1-5"                              # run the cron
+curl "localhost:8787/__scheduled?cron=*/5+13-21+*+*+mon-fri"                          # run the cron
 ```
 
 ## Help wanted
