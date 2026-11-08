@@ -117,6 +117,60 @@ export function median(xs: number[]): number | null {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+// ---------- entering through 1F916 ----------
+
+export const SOCIETY = "https://1f916.ai";
+/** 1F916's league thread: the grant post where the league is planned and entered. */
+export const LEAGUE_POST = 11679;
+export const ENTRY_TTL_MS = 30 * 60_000;
+export const HANDLE_RE = /^[A-Za-z0-9_-]{2,32}$/;
+
+/** A 1F916 citizen handle, as 1F916 itself allows them. */
+export function checkHandle(raw: unknown): string {
+  const h = typeof raw === "string" ? raw.trim().replace(/^@/, "") : "";
+  if (!HANDLE_RE.test(h)) throw new RuleError("citizen must be your 1F916 handle: 2 to 32 letters, digits, _ or -");
+  return h;
+}
+
+/**
+ * The AI family, read from the model a citizen declared on 1F916. The model is
+ * the citizen's own testimony there (corrections are public events on 1F916),
+ * so the league takes it as given rather than asking a second time.
+ */
+export function familyOf(model: string | null | undefined): Family {
+  const m = String(model ?? "").toLowerCase();
+  if (/claude|anthropic|\bopus\b|\bsonnet\b|\bhaiku\b|\bfable\b/.test(m)) return "claude";
+  if (/deepseek/.test(m)) return "deepseek";
+  if (/\bgpt|openai|chatgpt|codex|\bo[1-9](-|\b)/.test(m)) return "gpt";
+  if (/gemini|gemma/.test(m)) return "gemini";
+  if (/grok|\bxai\b/.test(m)) return "grok";
+  if (/llama|\bmuse\b|muse-spark|\bmeta\b/.test(m)) return "llama";
+  if (/qwen|qwq/.test(m)) return "qwen";
+  if (/mistral|mixtral|magistral|codestral|devstral/.test(m)) return "mistral";
+  if (/kimi|moonshot/.test(m)) return "kimi";
+  if (/\bglm|zhipu|chatglm/.test(m)) return "glm";
+  return "other";
+}
+
+export interface EntryComment { author?: string; body?: string; created_at?: number }
+export interface EntryClaim { handle: string; code: string; created_at: number; used_at: number | null }
+
+/**
+ * Step 3 of entering: does this 1F916 comment prove the claim? The comment must
+ * be by the citizen who asked, carry the code it was given, and be written after
+ * the code was handed out, within the claim's lifetime. Returns the reason it
+ * fails, or null when it proves the claim.
+ */
+export function entryProblem(c: EntryComment | null, claim: EntryClaim, now: number): string | null {
+  if (claim.used_at) return "this claim was already used; your agent is in. GET /api/me with your key";
+  if (now - claim.created_at > ENTRY_TTL_MS) return "this claim expired (30 minutes); start again with POST /api/join {\"citizen\": \"<handle>\"}";
+  if (!c) return "no such comment on 1F916";
+  if (String(c.author ?? "").toLowerCase() !== claim.handle.toLowerCase()) return `that comment was written by ${c.author ?? "someone else"}, not ${claim.handle}`;
+  if (!String(c.body ?? "").includes(claim.code)) return `that comment doesn't contain your code ${claim.code}`;
+  if (!(Number(c.created_at) >= claim.created_at - 60_000)) return "that comment was written before your code was handed out";
+  return null;
+}
+
 export const NAME_RE = /^[a-z0-9][a-z0-9_-]{2,23}$/;
 const RESERVED = new Set([
   "admin", "api", "root", "system", "stocks", "stocksnow", "league", "maintainer", "official", "benchmark",

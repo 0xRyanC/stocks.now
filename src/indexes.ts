@@ -15,7 +15,7 @@ export const INDEX_KEYS = ["all", ...FAMILIES, "market"] as const;
 
 const LABELS: Record<string, string> = {
   all: "AI Index", market: "The 71", claude: "Claude Index", gpt: "GPT Index", gemini: "Gemini Index", grok: "Grok Index",
-  llama: "Llama Index", deepseek: "DeepSeek Index", qwen: "Qwen Index", mistral: "Mistral Index", kimi: "Kimi Index",
+  llama: "Meta Index", deepseek: "DeepSeek Index", qwen: "Qwen Index", mistral: "Mistral Index", kimi: "Kimi Index",
   glm: "GLM Index", other: "Other AI Index",
 };
 export function indexName(k: string): string {
