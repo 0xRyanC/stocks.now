@@ -6,6 +6,7 @@ import { RULES, SEASON } from "./rules.ts";
 import type { BoardRow } from "./league.ts";
 import type { Tick } from "./engine.ts";
 import { indexList, indexName, indexBlurb, change24h, type IndexSummary } from "./indexes.ts";
+import { POOLS } from "./onchain.ts";
 
 // ---------- helpers ----------
 
@@ -273,7 +274,7 @@ export function layout(o: { title: string; desc?: string; body: string; tick: Ti
 </div></header>
 ${tape(o.tick)}
 <main class="wrap">${o.body}</main>
-<footer><div class="wrap"><div>${esc(SEASON)}. No real money. Not advice. Prices every 5 minutes: ${H24.length} stocks at their token's price on Base, any hour (GeckoTerminal); the rest at the US exchange price while the market is open (Yahoo Finance).</div>
+<footer><div class="wrap"><div>${esc(SEASON)}. No real money. Not advice. Prices every 5 minutes: ${H24.length} stocks at their token's price in its pool on Base, any hour, read straight from the chain; the rest at the US exchange price while the market is open (Yahoo Finance).</div>
 <div><a href="https://1f916.ai/grants/stocks-now">Built in the open by the agents of 1f916.ai</a> · <a href="https://github.com/1f916-ai/stocks.now">Code</a> · <a href="/skill.md">skill.md</a> · <a href="/api">API</a></div></div></footer>
 <script>
 (function(){
@@ -428,7 +429,7 @@ export function stockPage(d: any, tick: Tick | null): string {
   const onBase = q?.venue === "b";
   const gap = onBase && q.exchange_price ? q.price / q.exchange_price - 1 : null;
   const venue = s.h24
-    ? `<div class="opening" style="max-width:720px;margin-bottom:14px"><span class="dot live"></span><span><b>Trades 24/7.</b> ${esc(s.token)} has a real trading pool on Base, so the league uses the token's own price there, any hour of any day.${q?.exchange_price ? ` The stock on its exchange: ${price(q.exchange_price)}${gap !== null ? ` (the token is ${pct(gap)} from it)` : ""}.` : ""} <a href="https://www.geckoterminal.com/base/tokens/${s.contract}" style="color:var(--accent)">Pool prices</a></span></p>`
+    ? `<div class="opening" style="max-width:720px;margin-bottom:14px"><span class="dot live"></span><span><b>Trades 24/7.</b> ${esc(s.token)} has a real trading pool on Base, so the league uses the token's own price there, any hour of any day.${q?.exchange_price ? ` The stock on its exchange: ${price(q.exchange_price)}${gap !== null ? ` (the token is ${pct(gap)} from it)` : ""}.` : ""} ${POOLS[s.ticker] ? `<a href="https://www.geckoterminal.com/base/pools/${POOLS[s.ticker]}" style="color:var(--accent)">The pool</a>` : ""}${q?.block ? ` · <span class="mono">block ${q.block}</span>` : ""}</span></p>`
     : `<p class="sub" style="font-size:13.5px;max-width:720px;margin:12px 0 14px">Trades while the US market is open. ${esc(s.token)} has little or no trading pool on Base yet, so the league uses the stock's price on its exchange.</p>`;
   const daily = d.daily.map((r: any) => ({ x: Date.parse(r.day + "T16:00:00Z"), y: r.close }));
   const intra = d.intraday.map((r: any) => ({ x: r.at, y: r.price }));

@@ -10,6 +10,7 @@ import {
 import { BY_TICKER, STOCKS } from "./stocks.ts";
 import { fetchExchange, fetchBase, buildTick, hasNewPrices, SOURCE } from "./prices.ts";
 import { nextIndexes, type IndexSummary } from "./indexes.ts";
+import { POOLS } from "./onchain.ts";
 
 export interface Env {
   DB: D1Database;
@@ -167,7 +168,7 @@ export async function cancelOrder(env: Env, agent: AgentRow, id: number) {
 
 export async function orderReceipt(env: Env, id: number) {
   const o = await env.DB.prepare(
-    "SELECT o.id, a.name AS agent, o.ticker, o.side, o.cents, o.shares, o.note, o.status, o.placed_at, o.tick_id, o.fill_price, o.price_time, o.filled_at, o.cancelled_at, t.source AS tick_source, t.recorded_at AS tick_recorded_at, json_extract(t.data, '$.' || o.ticker || '[3]') AS venue FROM orders o JOIN agents a ON a.id = o.agent_id LEFT JOIN ticks t ON t.id = o.tick_id WHERE o.id = ?",
+    "SELECT o.id, a.name AS agent, o.ticker, o.side, o.cents, o.shares, o.note, o.status, o.placed_at, o.tick_id, o.fill_price, o.price_time, o.filled_at, o.cancelled_at, t.source AS tick_source, t.recorded_at AS tick_recorded_at, json_extract(t.data, '$.' || o.ticker || '[3]') AS venue, json_extract(t.data, '$.' || o.ticker || '[5]') AS block FROM orders o JOIN agents a ON a.id = o.agent_id LEFT JOIN ticks t ON t.id = o.tick_id WHERE o.id = ?",
   ).bind(id).first<any>();
   if (!o) return null;
   const r: any = {
@@ -183,7 +184,12 @@ export async function orderReceipt(env: Env, id: number) {
       price_record_url: `https://stocks.now/api/ticks/${o.tick_id}`,
       price_recorded_at: o.tick_recorded_at ? new Date(o.tick_recorded_at).toISOString() : null,
       source: o.tick_source ?? SOURCE,
-      venue: o.venue === "b" ? "the token's market on Base" : "the US exchange",
+      venue: o.venue === "b" ? "the token's pool on Base" : "the US exchange",
+      ...(o.venue === "b" && o.block && POOLS[o.ticker] ? {
+        base_block: o.block,
+        pool: POOLS[o.ticker],
+        recheck: `eth_call slot0() on ${POOLS[o.ticker]} at Base block ${o.block}; price = 100 / (sqrtPriceX96 / 2^96)^2`,
+      } : {}),
       applied_at: new Date(o.filled_at).toISOString(),
       ...(o.side === "buy" ? { shares_received: o.shares } : { cents_received: o.cents }),
       rule: "first price recorded after the order was placed, whose own price time is also after the order",
@@ -273,9 +279,8 @@ export async function recordTick(env: Env, fetcher: typeof fetch = fetch, force 
   if (!Object.keys(exchange).length && !Object.keys(base).length) throw new Error("no price source answered");
   const now = Date.now();
   const { data, held } = buildTick(exchange, base, last?.data ?? null, now);
-  const nowSec = Math.floor(now / 1000);
-  const fresh = { base: 0, exchange: Object.keys(exchange).length };
-  for (const q of Object.values(data)) if (q[3] === "b" && q[1] === nowSec) fresh.base++;
+  const fresh = { base: 0, exchange: Object.keys(exchange).length, block: base?.block ?? null, rpc: base?.rpc ?? null };
+  for (const q of Object.values(data)) if (q[3] === "b" && base && q[5] === base.block) fresh.base++;
   if (!force && !hasNewPrices(data, last?.data ?? null)) return { recorded: false, reason: "no new prices", fresh, held };
   const ins = await env.DB.prepare("INSERT INTO ticks (recorded_at, source, data) VALUES (?, ?, ?) RETURNING id").bind(now, SOURCE, JSON.stringify(data)).first<{ id: number }>();
   // The benchmark starts at the first price record taken on schedule, not at a manual one.
@@ -351,7 +356,7 @@ export async function loadBoard(env: Env, includeHidden = false) {
     env.DB.prepare("SELECT agent_id, value_cents FROM weeks WHERE week = (SELECT MAX(week) FROM weeks)"),
     env.DB.prepare("SELECT id, recorded_at, data FROM ticks ORDER BY id DESC LIMIT 1"),
     env.DB.prepare("SELECT t.id, t.recorded_at, t.data FROM ticks t JOIN meta m ON m.k = 'season_start_tick' AND t.id = CAST(m.v AS INTEGER)"),
-    env.DB.prepare("SELECT (SELECT COUNT(*) FROM orders WHERE status = 'filled') AS fills, (SELECT COUNT(*) FROM orders WHERE status = 'pending') AS pending, (SELECT COUNT(*) FROM ticks) AS ticks"),
+    env.DB.prepare("SELECT (SELECT COUNT(*) FROM orders o JOIN agents a ON a.id = o.agent_id WHERE o.status = 'filled' AND a.hidden = 0) AS fills, (SELECT COUNT(*) FROM orders o JOIN agents a ON a.id = o.agent_id WHERE o.status = 'pending' AND a.hidden = 0) AS pending, (SELECT COUNT(*) FROM ticks) AS ticks"),
     env.DB.prepare("SELECT v FROM meta WHERE k = 'indexes'"),
   ]);
   const ir = idxRow.results[0] as any;
@@ -447,7 +452,7 @@ export async function stockDetail(env: Env, ticker: string) {
   const q = tr ? (JSON.parse(tr.data)[ticker] ?? null) : null;
   return {
     stock: s,
-    quote: q ? { price: q[0], market_time: q[1], previous_close: q[2], venue: q[3] ?? "x", exchange_price: q[4] ?? null } : null,
+    quote: q ? { price: q[0], market_time: q[1], previous_close: q[2], venue: q[3] ?? "x", exchange_price: q[4] ?? null, block: q[5] ?? null } : null,
     daily: (daily.results as any[]).reverse(),
     intraday: (intraday.results as any[]).filter((r) => r.q).map((r) => ({ at: r.recorded_at, ...(() => { const x = JSON.parse(r.q); return { price: x[0], market_time: x[1] }; })() })),
     holders: holders.results as any[],

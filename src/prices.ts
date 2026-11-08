@@ -1,9 +1,10 @@
 // Price recording. Every 5 minutes, day and night, we read two kinds of price
 // and save them as one record (a "tick"):
 //
-// - Base: the token's own market price on Base, for the stocks whose token has
-//   a real trading pool there (h24 in stocks.ts). These trade 24/7, like the
-//   tokens themselves. Read from GeckoTerminal, with DEX Screener as backup.
+// - Base: the token's own price in its trading pool on Base, for the stocks
+//   whose token has a real pool there (h24 in stocks.ts). These trade 24/7,
+//   like the tokens themselves. Read straight from the chain (onchain.ts), so
+//   each one names the block it came from and anyone can re-check it.
 // - Exchange: the stock's regular-market price on its US exchange, for the
 //   rest. These only move while the US market is open. Read from Yahoo Finance.
 //
@@ -12,9 +13,10 @@
 
 import { STOCKS } from "./stocks.ts";
 import type { Quote, TickData } from "./engine.ts";
+import { readPools, type ChainRead } from "./onchain.ts";
 
-export const SOURCE = "base: GeckoTerminal token price (DEX Screener backup) · exchange: Yahoo Finance regularMarketPrice";
-export const QUOTE_FORMAT = "TICKER: [price, price_time_unix_seconds, previous_close, venue (b = token on Base, x = US exchange), exchange_price]";
+export const SOURCE = "base: pool price on Base (Aerodrome Slipstream slot0, read through Multicall3 at the block in each quote) · exchange: Yahoo Finance regularMarketPrice";
+export const QUOTE_FORMAT = "TICKER: [price, price_time_unix_seconds, previous_close, venue (b = token's pool on Base, x = US exchange), exchange_price, base_block]";
 const UA = "Mozilla/5.0 (compatible; stocks-now-league/1.0; +https://stocks.now)";
 
 /** A token's pool must hold at least this much (in dollars) for its price to count. */
@@ -23,7 +25,6 @@ export const MIN_POOL_USD = 25_000;
 export const MAX_GAP = 0.15;
 
 export interface ExchangeQuote { price: number; t: number; prev: number | null; sessionStart: number | null; sessionEnd: number | null }
-export interface BaseQuote { price: number; poolUsd: number; src: "g" | "d" }
 
 /** Yahoo Finance: regular-market price of every stock, 20 per request. */
 export async function fetchExchange(fetcher: typeof fetch = fetch): Promise<Record<string, ExchangeQuote>> {
@@ -52,43 +53,13 @@ export async function fetchExchange(fetcher: typeof fetch = fetch): Promise<Reco
   return out;
 }
 
-/** Token prices on Base for the 24/7 stocks: GeckoTerminal first, DEX Screener for anything it misses. */
-export async function fetchBase(fetcher: typeof fetch = fetch): Promise<Record<string, BaseQuote>> {
-  const list = STOCKS.filter((s) => s.h24);
-  const byAddr = new Map(list.map((s) => [s.contract.toLowerCase(), s.ticker]));
-  const out: Record<string, BaseQuote> = {};
-  const chunks: string[][] = [];
-  for (let i = 0; i < list.length; i += 30) chunks.push(list.slice(i, i + 30).map((s) => s.contract.toLowerCase()));
-
-  await Promise.all(chunks.map(async (addrs) => {
-    try {
-      const r = await fetcher(`https://api.geckoterminal.com/api/v2/networks/base/tokens/multi/${addrs.join(",")}`, { headers: { "user-agent": UA, accept: "application/json" } });
-      if (!r.ok) return;
-      const j = (await r.json()) as any;
-      for (const d of j?.data ?? []) {
-        const a = d?.attributes;
-        const t = byAddr.get(String(a?.address).toLowerCase());
-        const price = Number(a?.price_usd), pool = Number(a?.total_reserve_in_usd);
-        if (t && price > 0) out[t] = { price, poolUsd: pool > 0 ? pool : 0, src: "g" };
-      }
-    } catch { /* fall through to the backup */ }
-  }));
-
-  const missing = list.filter((s) => !out[s.ticker]).map((s) => s.contract.toLowerCase());
-  for (let i = 0; i < missing.length; i += 30) {
-    try {
-      const r = await fetcher(`https://api.dexscreener.com/tokens/v1/base/${missing.slice(i, i + 30).join(",")}`, { headers: { "user-agent": UA, accept: "application/json" } });
-      if (!r.ok) continue;
-      const pairs = (await r.json()) as any[];
-      for (const p of Array.isArray(pairs) ? pairs : []) {
-        const t = byAddr.get(String(p?.baseToken?.address).toLowerCase());
-        const price = Number(p?.priceUsd), pool = Number(p?.liquidity?.usd);
-        if (!t || !(price > 0)) continue;
-        if (!out[t] || (out[t].src === "d" && pool > out[t].poolUsd)) out[t] = { price, poolUsd: pool > 0 ? pool : 0, src: "d" };
-      }
-    } catch { /* those stocks keep their last price */ }
+/** Pool prices on Base for the 24/7 stocks, or null if no RPC answered (they keep their last price). */
+export async function fetchBase(fetcher: typeof fetch = fetch): Promise<ChainRead | null> {
+  try {
+    return await readPools(fetcher);
+  } catch {
+    return null;
   }
-  return out;
 }
 
 /** The close an exchange price is compared against: yesterday's while the market is open, today's after. */
@@ -104,7 +75,7 @@ function lastClose(x: ExchangeQuote, nowSec: number): number | null {
  */
 export function buildTick(
   exchange: Record<string, ExchangeQuote>,
-  base: Record<string, BaseQuote>,
+  base: ChainRead | null,
   last: TickData | null,
   nowMs: number,
 ): { data: TickData; held: string[] } {
@@ -116,12 +87,12 @@ export function buildTick(
     const prevQ = last?.[s.ticker];
     let q: Quote | null = null;
     if (s.h24) {
-      const b = base[s.ticker];
+      const b = base?.pools[s.ticker];
       // Compare against the exchange: live while the market is open, else its last close.
       const ref = x?.price ?? (prevQ?.[4] ?? null);
       const close = x ? lastClose(x, nowSec) : (prevQ?.[2] ?? null);
-      if (b && b.poolUsd >= MIN_POOL_USD && ref && Math.abs(b.price / ref - 1) <= MAX_GAP) {
-        q = [round6(b.price), nowSec, close, "b", ref];
+      if (b && base && b.poolUsd >= MIN_POOL_USD && ref && Math.abs(b.price / ref - 1) <= MAX_GAP) {
+        q = [round6(b.price), base.time, close, "b", ref, base.block];
       } else if (b) held.push(s.ticker);
     } else if (x) {
       q = [x.price, x.t, x.prev, "x"];

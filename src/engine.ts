@@ -15,11 +15,11 @@ export type Family = (typeof FAMILIES)[number];
 
 /**
  * One stock's entry in a price record: [price in dollars, price time in seconds,
- * previous close, venue, exchange price]. Venue "b" is the token's own market on
- * Base (24/7); "x" is the stock's US exchange. Records from before 8 November
- * 2026 have only the first three.
+ * previous close, venue, exchange price, Base block]. Venue "b" is the token's
+ * pool on Base (24/7), read at that block; "x" is the stock's US exchange.
+ * Records from before 8 November 2026 have only the first three.
  */
-export type Quote = [number, number, number | null, ("b" | "x")?, number?];
+export type Quote = [number, number, number | null, ("b" | "x")?, number?, number?];
 export type TickData = Record<string, Quote>;
 
 export interface Tick { id: number; recorded_at: number; data: TickData }
