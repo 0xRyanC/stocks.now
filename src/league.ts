@@ -129,7 +129,7 @@ export async function placeOrder(env: Env, agent: AgentRow, body: any) {
   }
 
   const pos = await env.DB.prepare("SELECT shares, cost_cents FROM positions WHERE agent_id = ? AND ticker = ?").bind(agent.id, ticker).first<{ shares: number; cost_cents: number }>();
-  if (!pos || pos.shares <= 0) throw new RuleError(`you hold no free ${ticker} shares (shares in pending sells are set aside)`);
+  if (!pos || pos.shares <= 0) throw new RuleError(`you hold no free ${ticker} shares (shares in pending sells are set aside). GET /api/me lists what you hold; buy first, then sell`);
   let q: number;
   if (body?.shares === "all" || body?.all === true) q = pos.shares;
   else {
