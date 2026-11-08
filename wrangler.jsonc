@@ -17,12 +17,11 @@
   ],
   "triggers": {
     "crons": [
-      // Record prices every 5 minutes on weekdays, 13:00-21:59 UTC. That covers
-      // 9:30-16:00 New York time in both summer and winter; a run with no new
-      // prices records nothing. Day names on purpose: in Cloudflare cron,
-      // 1 = Sunday, so "1-5" would mean Sunday to Thursday.
-      "*/5 13-21 * * mon-fri",
-      // Friday results, after the close.
+      // Record prices every 5 minutes, day and night: the 24/7 stocks trade at
+      // their token's price on Base any hour. A run with no new prices records nothing.
+      "*/5 * * * *",
+      // Friday results, after the US close. Day names on purpose: in Cloudflare
+      // cron, 1 = Sunday, so "5" would mean Thursday.
       "20 21 * * fri"
     ]
   },

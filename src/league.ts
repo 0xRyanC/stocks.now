@@ -4,11 +4,12 @@
 import {
   START_CENTS, MIN_ORDER_CENTS, MAX_PENDING, MAX_ORDERS_PER_DAY, NOTE_MAX,
   RuleError, checkName, checkFamily, checkText, firstEligible, sharesFor, proceedsFor,
-  floorShares, accountValue, weekScore, median, nyDate,
+  floorShares, accountValue, weekScore, nyDate,
   type TickData, type Tick, type Holding, type OpenOrder,
 } from "./engine.ts";
 import { BY_TICKER, STOCKS } from "./stocks.ts";
-import { fetchQuotes, hasNewPrices, SOURCE } from "./prices.ts";
+import { fetchExchange, fetchBase, buildTick, hasNewPrices, SOURCE } from "./prices.ts";
+import { nextIndexes, type IndexSummary } from "./indexes.ts";
 
 export interface Env {
   DB: D1Database;
@@ -16,7 +17,7 @@ export interface Env {
   IP_SALT?: string;
 }
 
-const SETTLE_BATCH = 8; // orders settled per pass; keeps each run well under D1's per-request query limit
+const FILL_BATCH = 200; // orders filled per pass; every pass is 5 queries however many it fills
 
 // ---------- keys ----------
 
@@ -166,7 +167,7 @@ export async function cancelOrder(env: Env, agent: AgentRow, id: number) {
 
 export async function orderReceipt(env: Env, id: number) {
   const o = await env.DB.prepare(
-    "SELECT o.id, a.name AS agent, o.ticker, o.side, o.cents, o.shares, o.note, o.status, o.placed_at, o.tick_id, o.fill_price, o.price_time, o.filled_at, o.cancelled_at, t.source AS tick_source, t.recorded_at AS tick_recorded_at FROM orders o JOIN agents a ON a.id = o.agent_id LEFT JOIN ticks t ON t.id = o.tick_id WHERE o.id = ?",
+    "SELECT o.id, a.name AS agent, o.ticker, o.side, o.cents, o.shares, o.note, o.status, o.placed_at, o.tick_id, o.fill_price, o.price_time, o.filled_at, o.cancelled_at, t.source AS tick_source, t.recorded_at AS tick_recorded_at, json_extract(t.data, '$.' || o.ticker || '[3]') AS venue FROM orders o JOIN agents a ON a.id = o.agent_id LEFT JOIN ticks t ON t.id = o.tick_id WHERE o.id = ?",
   ).bind(id).first<any>();
   if (!o) return null;
   const r: any = {
@@ -182,53 +183,81 @@ export async function orderReceipt(env: Env, id: number) {
       price_record_url: `https://stocks.now/api/ticks/${o.tick_id}`,
       price_recorded_at: o.tick_recorded_at ? new Date(o.tick_recorded_at).toISOString() : null,
       source: o.tick_source ?? SOURCE,
+      venue: o.venue === "b" ? "the token's market on Base" : "the US exchange",
       applied_at: new Date(o.filled_at).toISOString(),
       ...(o.side === "buy" ? { shares_received: o.shares } : { cents_received: o.cents }),
-      rule: "first price recorded after the order was placed, whose own market time is also after the order",
+      rule: "first price recorded after the order was placed, whose own price time is also after the order",
     };
   }
   if (o.status === "cancelled") r.cancelled_at = new Date(o.cancelled_at).toISOString();
-  if (o.status === "pending") r.waiting_for = "the next price recorded after this order (every 5 minutes while the US market is open)";
+  if (o.status === "pending") r.waiting_for = BY_TICKER[o.ticker]?.h24
+    ? "the next price recorded after this order (every 5 minutes, any hour: this stock trades 24/7 on Base)"
+    : "the next price recorded after this order (every 5 minutes while the US market is open)";
   return r;
 }
 
 // ---------- fills ----------
 
-/** Fill pending orders whose price has been recorded. Safe to run concurrently: every fill is guarded. */
+/**
+ * Fill pending orders whose price has been recorded. Many at a time, in five
+ * queries: find them, then one transaction that marks them filled and credits
+ * shares (buys) and cash (sells). The credits read back only the orders this run
+ * marked (fill_run), so two runs racing can never both credit the same order.
+ */
 export async function settle(env: Env, agentId?: number): Promise<number> {
-  const q = agentId
-    ? env.DB.prepare("SELECT id, agent_id, ticker, side, cents, shares, placed_at FROM orders WHERE status = 'pending' AND agent_id = ? ORDER BY id LIMIT ?").bind(agentId, SETTLE_BATCH)
-    : env.DB.prepare("SELECT id, agent_id, ticker, side, cents, shares, placed_at FROM orders WHERE status = 'pending' ORDER BY id LIMIT ?").bind(SETTLE_BATCH);
-  const pending = (await q.all<any>()).results;
-  if (!pending.length) return 0;
-  const lookups = await env.DB.batch(pending.map((o) =>
-    env.DB.prepare("SELECT id, recorded_at, json_extract(data, '$.' || ?) AS q FROM ticks WHERE recorded_at > ? ORDER BY id LIMIT 100").bind(o.ticker, o.placed_at),
-  ));
+  const latest = await env.DB.prepare("SELECT data FROM ticks ORDER BY id DESC LIMIT 1").first<{ data: string }>();
+  if (!latest) return 0;
+  // Skip orders whose stock has no price newer than the order yet (a weekend
+  // order on a weekday-only stock): no old records are read for them.
+  const found = await env.DB.prepare(
+    `SELECT p.id, p.ticker, p.side, p.cents, p.shares, p.placed_at, t.id AS tick_id, t.recorded_at, json_extract(t.data, '$.' || p.ticker) AS q
+     FROM (
+       SELECT o.id, o.ticker, o.side, o.cents, o.shares, o.placed_at,
+         (SELECT t2.id FROM ticks t2
+           WHERE t2.recorded_at > o.placed_at
+             AND json_extract(t2.data, '$.' || o.ticker || '[1]') * 1000 > o.placed_at
+             AND json_extract(t2.data, '$.' || o.ticker || '[0]') > 0
+           ORDER BY t2.recorded_at, t2.id LIMIT 1) AS tid
+       FROM orders o
+       WHERE o.status = 'pending' AND (?3 IS NULL OR o.agent_id = ?3)
+         AND json_extract(?1, '$.' || o.ticker || '[1]') * 1000 > o.placed_at
+       ORDER BY o.id LIMIT ?2
+     ) p JOIN ticks t ON t.id = p.tid`,
+  ).bind(latest.data, FILL_BATCH, agentId ?? null).all<any>();
+  const fills: [number, number | null, number | null, number, number, number][] = [];
+  for (const o of found.results) {
+    const quote = JSON.parse(o.q);
+    // The SQL above is the fill rule; check it once more with the tested version.
+    const hit = firstEligible(o, [{ id: o.tick_id, recorded_at: o.recorded_at, data: { [o.ticker]: quote } }]);
+    if (!hit) continue;
+    const [price, pt] = hit.quote;
+    if (o.side === "buy") fills.push([o.id, sharesFor(o.cents, price), null, o.tick_id, price, pt]);
+    else fills.push([o.id, null, proceedsFor(o.shares, price), o.tick_id, price, pt]);
+  }
+  if (!fills.length) return 0;
+  const run = crypto.randomUUID();
   const now = Date.now();
-  const stmts: D1PreparedStatement[] = [];
-  let filled = 0;
-  pending.forEach((o, i) => {
-    const ticks: Tick[] = (lookups[i].results as any[]).filter((r) => r.q).map((r) => ({ id: r.id, recorded_at: r.recorded_at, data: { [o.ticker]: JSON.parse(r.q) } }));
-    const hit = firstEligible(o, ticks);
-    if (!hit) return;
-    const [price, mt] = hit.quote;
-    filled++;
-    if (o.side === "buy") {
-      const shares = sharesFor(o.cents, price);
-      stmts.push(
-        env.DB.prepare("UPDATE orders SET status = 'filled', shares = ?, tick_id = ?, fill_price = ?, price_time = ?, filled_at = ? WHERE id = ? AND status = 'pending'").bind(shares, hit.tick.id, price, mt, now, o.id),
-        env.DB.prepare("INSERT INTO positions (agent_id, ticker, shares, cost_cents) SELECT ?, ?, ?, ? WHERE changes() = 1 ON CONFLICT (agent_id, ticker) DO UPDATE SET shares = shares + excluded.shares, cost_cents = cost_cents + excluded.cost_cents").bind(o.agent_id, o.ticker, shares, o.cents),
-      );
-    } else {
-      const cents = proceedsFor(o.shares, price);
-      stmts.push(
-        env.DB.prepare("UPDATE orders SET status = 'filled', cents = ?, tick_id = ?, fill_price = ?, price_time = ?, filled_at = ? WHERE id = ? AND status = 'pending'").bind(cents, hit.tick.id, price, mt, now, o.id),
-        env.DB.prepare("UPDATE agents SET cash_cents = cash_cents + ? WHERE id = ? AND changes() = 1").bind(cents, o.agent_id),
-      );
-    }
-  });
-  if (stmts.length) await env.DB.batch(stmts);
-  return filled;
+  const res = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE orders SET status = 'filled',
+         shares = CASE WHEN orders.side = 'buy' THEN json_extract(j.value, '$[1]') ELSE orders.shares END,
+         cents = CASE WHEN orders.side = 'sell' THEN json_extract(j.value, '$[2]') ELSE orders.cents END,
+         tick_id = json_extract(j.value, '$[3]'), fill_price = json_extract(j.value, '$[4]'), price_time = json_extract(j.value, '$[5]'),
+         filled_at = ?1, fill_run = ?2
+       FROM json_each(?3) AS j
+       WHERE orders.id = json_extract(j.value, '$[0]') AND orders.status = 'pending'`,
+    ).bind(now, run, JSON.stringify(fills)),
+    env.DB.prepare(
+      `INSERT INTO positions (agent_id, ticker, shares, cost_cents)
+       SELECT agent_id, ticker, SUM(shares), SUM(cents) FROM orders WHERE fill_run = ?1 AND side = 'buy' GROUP BY agent_id, ticker
+       ON CONFLICT (agent_id, ticker) DO UPDATE SET shares = shares + excluded.shares, cost_cents = cost_cents + excluded.cost_cents`,
+    ).bind(run),
+    env.DB.prepare(
+      `UPDATE agents SET cash_cents = cash_cents + (SELECT SUM(o.cents) FROM orders o WHERE o.fill_run = ?1 AND o.side = 'sell' AND o.agent_id = agents.id)
+       WHERE id IN (SELECT agent_id FROM orders WHERE fill_run = ?1 AND side = 'sell')`,
+    ).bind(run),
+  ]);
+  return res[0].meta.changes ?? 0;
 }
 
 // ---------- price records ----------
@@ -240,17 +269,21 @@ export async function latestTick(env: Env): Promise<Tick | null> {
 
 export async function recordTick(env: Env, fetcher: typeof fetch = fetch, force = false) {
   const last = await latestTick(env);
-  const { data, missing } = await fetchQuotes(fetcher);
-  if (!force && !hasNewPrices(data, last?.data ?? null)) return { recorded: false, reason: "no new prices (market closed?)", missing };
-  if (last) for (const t of missing) if (last.data[t]) data[t] = last.data[t];
+  const [exchange, base] = await Promise.all([fetchExchange(fetcher), fetchBase(fetcher)]);
+  if (!Object.keys(exchange).length && !Object.keys(base).length) throw new Error("no price source answered");
   const now = Date.now();
+  const { data, held } = buildTick(exchange, base, last?.data ?? null, now);
+  const nowSec = Math.floor(now / 1000);
+  const fresh = { base: 0, exchange: Object.keys(exchange).length };
+  for (const q of Object.values(data)) if (q[3] === "b" && q[1] === nowSec) fresh.base++;
+  if (!force && !hasNewPrices(data, last?.data ?? null)) return { recorded: false, reason: "no new prices", fresh, held };
   const ins = await env.DB.prepare("INSERT INTO ticks (recorded_at, source, data) VALUES (?, ?, ?) RETURNING id").bind(now, SOURCE, JSON.stringify(data)).first<{ id: number }>();
   // The benchmark starts at the first price record taken on schedule, not at a manual one.
   if (!force) await env.DB.prepare("INSERT OR IGNORE INTO meta (k, v) VALUES ('season_start_tick', ?)").bind(String(ins!.id)).run();
-  return { recorded: true, id: ins!.id, stocks: Object.keys(data).length, missing };
+  return { recorded: true, id: ins!.id, stocks: Object.keys(data).length, fresh, held };
 }
 
-/** Half-hourly: save every agent's value (for charts) and today's closes so far. */
+/** Half-hourly: save every agent's value (for charts), today's closes so far, and the next step of the AI indexes. */
 export async function markAndClose(env: Env) {
   const b = await loadBoard(env, true);
   if (!b.tick) return;
@@ -258,10 +291,22 @@ export async function markAndClose(env: Env) {
   const marks = b.rows.map((r) => [r.id, r.value]);
   const closes: Record<string, [string, number]> = {};
   for (const [t, q] of Object.entries(b.tick.data)) closes[t] = [nyDate(q[1] * 1000), q[0]];
-  await env.DB.batch([
+  const { summary, points } = nextIndexes(
+    b.indexes, at,
+    b.rows.map((r) => ({ id: r.id, family: r.family, value: r.value, hidden: !!r.hidden, first_trade: r.first_trade })),
+    b.benchmark,
+  );
+  const stmts = [
     env.DB.prepare("INSERT OR IGNORE INTO marks (agent_id, at, value_cents) SELECT json_extract(value, '$[0]'), ?, json_extract(value, '$[1]') FROM json_each(?)").bind(at, JSON.stringify(marks)),
     env.DB.prepare("INSERT INTO daily (ticker, day, close) SELECT key, json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?) WHERE true ON CONFLICT (ticker, day) DO UPDATE SET close = excluded.close").bind(JSON.stringify(closes)),
-  ]);
+  ];
+  if (points.length) {
+    stmts.push(
+      env.DB.prepare("INSERT OR IGNORE INTO idx (fam, at, level, members) SELECT json_extract(value, '$[0]'), ?, json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?)").bind(at, JSON.stringify(points)),
+      env.DB.prepare("INSERT INTO meta (k, v) VALUES ('indexes', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(summary)),
+    );
+  }
+  await env.DB.batch(stmts);
 }
 
 /** Friday after the close: record each agent's week. Score counts new highs only. Runs once per week. */
@@ -288,7 +333,7 @@ export interface BoardRow {
   id: number; rank: number; name: string; family: string; model: string | null; about: string | null;
   value: number; start: number; ret: number; week_base: number; week_change: number;
   high_water_cents: number; cash: number; holdings: number; trades: number; last_trade: number | null;
-  created_at: number; top: string[];
+  first_trade: number | null; hidden: number; created_at: number; top: string[];
 }
 
 export function pricesOf(tick: Tick | null): Record<string, number> {
@@ -298,16 +343,19 @@ export function pricesOf(tick: Tick | null): Record<string, number> {
 }
 
 export async function loadBoard(env: Env, includeHidden = false) {
-  const [agents, positions, open, trades, weekRows, tickRow, startRow, totals] = await env.DB.batch([
+  const [agents, positions, open, trades, weekRows, tickRow, startRow, totals, idxRow] = await env.DB.batch([
     env.DB.prepare(`SELECT ${AGENT_COLS} FROM agents ${includeHidden ? "" : "WHERE hidden = 0"}`),
     env.DB.prepare("SELECT agent_id, ticker, shares, cost_cents FROM positions WHERE shares > 0"),
     env.DB.prepare("SELECT agent_id, ticker, side, cents, shares FROM orders WHERE status = 'pending'"),
-    env.DB.prepare("SELECT agent_id, COUNT(*) AS n, MAX(filled_at) AS last FROM orders WHERE status = 'filled' GROUP BY agent_id"),
+    env.DB.prepare("SELECT agent_id, COUNT(*) AS n, MAX(filled_at) AS last, MIN(filled_at) AS first FROM orders WHERE status = 'filled' GROUP BY agent_id"),
     env.DB.prepare("SELECT agent_id, value_cents FROM weeks WHERE week = (SELECT MAX(week) FROM weeks)"),
     env.DB.prepare("SELECT id, recorded_at, data FROM ticks ORDER BY id DESC LIMIT 1"),
     env.DB.prepare("SELECT t.id, t.recorded_at, t.data FROM ticks t JOIN meta m ON m.k = 'season_start_tick' AND t.id = CAST(m.v AS INTEGER)"),
     env.DB.prepare("SELECT (SELECT COUNT(*) FROM orders WHERE status = 'filled') AS fills, (SELECT COUNT(*) FROM orders WHERE status = 'pending') AS pending, (SELECT COUNT(*) FROM ticks) AS ticks"),
+    env.DB.prepare("SELECT v FROM meta WHERE k = 'indexes'"),
   ]);
+  const ir = idxRow.results[0] as any;
+  const indexes: IndexSummary | null = ir ? JSON.parse(ir.v) : null;
   const tr = tickRow.results[0] as any;
   const tick: Tick | null = tr ? { id: tr.id, recorded_at: tr.recorded_at, data: JSON.parse(tr.data) } : null;
   const sr = startRow.results[0] as any;
@@ -329,17 +377,11 @@ export async function loadBoard(env: Env, includeHidden = false) {
       id: a.id, rank: 0, name: a.name, family: a.family, model: a.model, about: a.about,
       value, start: a.start_cents, ret: value / a.start_cents - 1, week_base: weekBase, week_change: value - weekBase,
       high_water_cents: a.high_water_cents, cash: a.cash_cents, holdings: s.h.length, trades: t?.n ?? 0, last_trade: t?.last ?? null,
-      created_at: a.created_at, top,
+      first_trade: t?.first ?? null, hidden: a.hidden, created_at: a.created_at, top,
     };
   });
   rows.sort((x, y) => y.value - x.value || x.created_at - y.created_at);
   rows.forEach((r, i) => (r.rank = i + 1));
-
-  // Families: median return of agents that have made at least one trade.
-  const fam = new Map<string, number[]>();
-  for (const r of rows) if (r.trades > 0) (fam.get(r.family) ?? fam.set(r.family, []).get(r.family)!).push(r.ret);
-  const families = [...fam.entries()].map(([family, rets]) => ({ family, agents: rets.length, median_return: median(rets)! }))
-    .sort((a, b) => b.median_return - a.median_return);
 
   // Benchmark: $1,000 split equally across all 71 at the season's first price record, never traded.
   let benchmark: number | null = null;
@@ -352,7 +394,7 @@ export async function loadBoard(env: Env, includeHidden = false) {
     if (rel.length) benchmark = Math.floor(START_CENTS * rel.reduce((x, y) => x + y, 0) / rel.length);
   }
   const t = totals.results[0] as any;
-  return { rows, families, benchmark, tick, startTick, stats: { agents: rows.length, fills: t.fills, pending: t.pending, ticks: t.ticks } };
+  return { rows, indexes, benchmark, tick, startTick, stats: { agents: rows.length, fills: t.fills, pending: t.pending, ticks: t.ticks } };
 }
 
 export async function recentFills(env: Env, limit = 30, ticker?: string) {
@@ -405,12 +447,23 @@ export async function stockDetail(env: Env, ticker: string) {
   const q = tr ? (JSON.parse(tr.data)[ticker] ?? null) : null;
   return {
     stock: s,
-    quote: q ? { price: q[0], market_time: q[1], previous_close: q[2] } : null,
+    quote: q ? { price: q[0], market_time: q[1], previous_close: q[2], venue: q[3] ?? "x", exchange_price: q[4] ?? null } : null,
     daily: (daily.results as any[]).reverse(),
     intraday: (intraday.results as any[]).filter((r) => r.q).map((r) => ({ at: r.recorded_at, ...(() => { const x = JSON.parse(r.q); return { price: x[0], market_time: x[1] }; })() })),
     holders: holders.results as any[],
     fills: await recentFills(env, 30, ticker),
   };
+}
+
+/** One index: its full history, the agents in it, what they hold together, and their latest trades. */
+export async function indexDetail(env: Env, key: string) {
+  const fam = key === "all" ? null : key;
+  const [hist, held, fills] = await env.DB.batch([
+    env.DB.prepare("SELECT at, level, members FROM idx WHERE fam = ? ORDER BY at").bind(key),
+    env.DB.prepare("SELECT p.ticker, SUM(p.shares) AS shares, COUNT(*) AS agents FROM positions p JOIN agents a ON a.id = p.agent_id WHERE p.shares > 0 AND a.hidden = 0 AND (?1 IS NULL OR a.family = ?1) GROUP BY p.ticker").bind(fam),
+    env.DB.prepare("SELECT o.id, a.name, a.family, o.ticker, o.side, o.cents, o.shares, o.fill_price, o.filled_at, o.note FROM orders o JOIN agents a ON a.id = o.agent_id WHERE o.status = 'filled' AND a.hidden = 0 AND (?1 IS NULL OR a.family = ?1) ORDER BY o.filled_at DESC, o.id DESC LIMIT 30").bind(fam),
+  ]);
+  return { history: hist.results as any[], held: held.results as any[], fills: fills.results as any[] };
 }
 
 export async function setHidden(env: Env, name: string, hidden: boolean) {

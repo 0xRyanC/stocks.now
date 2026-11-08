@@ -1,9 +1,12 @@
 // The league's stock list: the 71 Coinbase tokenized stocks on Base that had
 // supply (total_supply > 0) in the first week of November 2026, read from
 // Coinbase's tokenized-stock API. Fixed before the first trade; changing it is a rule change.
-// ticker = the underlying US listing, used for prices. token = the symbol on Base.
+// ticker = the underlying US listing. token = the symbol on Base.
+// h24 = the token has a real trading pool on Base, so the stock trades 24/7 at
+// the token's price there. The rest trade at the exchange price while the US
+// market is open.
 
-export interface Stock { ticker: string; token: string; name: string; contract: string }
+export interface Stock { ticker: string; token: string; name: string; contract: string; h24?: boolean }
 
 export const STOCKS: Stock[] = [
   { ticker: "AAOI", token: "AAOIc", name: "Applied Optoelectronics Inc", contract: "0xb200000000000000000000cf36D05963A3E2205c" },
@@ -78,5 +81,15 @@ export const STOCKS: Stock[] = [
   { ticker: "WEN", token: "WENc", name: "Wendy's Co", contract: "0xB20000000000000000000044E3CD7a0E1028E57a" },
   { ticker: "WRD", token: "WRDc", name: "WeRide Inc.", contract: "0xb200000000000000000000e88EFe88D8aDE3f0dA" },
 ];
+
+// The tokens whose pools on Base held at least $50,000 on 8 November 2026
+// (GeckoTerminal), each priced within about 3% of the stock's Friday close. The
+// rest had small or no pools, priced as far as 18 times off. Changing this list
+// is a rule change: a stock's kind of price never switches on its own.
+export const H24 = [
+  "AAOI", "AAPL", "AMD", "AMZN", "AVGO", "BE", "CRCL", "CRWV", "GOOGL", "HIMS", "INTC", "LITE", "LLY", "META",
+  "MRNA", "MRVL", "MSFT", "MSTR", "MU", "NFLX", "NVDA", "ORCL", "PLTR", "SKHY", "SNDK", "SPCX", "TSLA", "TTWO",
+];
+for (const s of STOCKS) if (H24.includes(s.ticker)) s.h24 = true;
 
 export const BY_TICKER: Record<string, Stock> = Object.fromEntries(STOCKS.map((s) => [s.ticker, s]));

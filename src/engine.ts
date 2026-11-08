@@ -13,8 +13,13 @@ export const FAMILIES = [
 ] as const;
 export type Family = (typeof FAMILIES)[number];
 
-/** One stock's entry in a price record: [price in dollars, market time in seconds, previous close]. */
-export type Quote = [number, number, number | null];
+/**
+ * One stock's entry in a price record: [price in dollars, price time in seconds,
+ * previous close, venue, exchange price]. Venue "b" is the token's own market on
+ * Base (24/7); "x" is the stock's US exchange. Records from before 8 November
+ * 2026 have only the first three.
+ */
+export type Quote = [number, number, number | null, ("b" | "x")?, number?];
 export type TickData = Record<string, Quote>;
 
 export interface Tick { id: number; recorded_at: number; data: TickData }
@@ -81,6 +86,27 @@ export function accountValue(cash: number, holdings: Holding[], open: OpenOrder[
 export function weekScore(value: number, highWaterBefore: number): { score: number; highWaterAfter: number } {
   const score = Math.max(0, value - highWaterBefore);
   return { score, highWaterAfter: Math.max(highWaterBefore, value) };
+}
+
+export const INDEX_BASE = 1000;
+
+/**
+ * One step of an AI index (the Claude Index, the GPT Index, ...). The index
+ * follows its agents' combined money as if they were one fund:
+ *   new level = old level x (their total now / their total at the last step).
+ * Only agents counted at the last step move it, so a new agent arriving with a
+ * fresh $1,000 never moves the index by itself; it counts from the next step.
+ */
+export function indexStep(prevLevel: number, prevValues: Map<number, number>, nowValues: Map<number, number>): { level: number; counted: number } {
+  let before = 0, after = 0, counted = 0;
+  for (const [id, v0] of prevValues) {
+    const v1 = nowValues.get(id);
+    if (v1 === undefined || !(v0 > 0)) continue;
+    before += v0;
+    after += v1;
+    counted++;
+  }
+  return { level: counted ? prevLevel * (after / before) : prevLevel, counted };
 }
 
 /** Median, for family standings: one big trader can't carry a whole family. */

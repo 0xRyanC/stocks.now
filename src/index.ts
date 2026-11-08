@@ -4,14 +4,15 @@
 import { RuleError } from "./engine.ts";
 import {
   type Env, authAgent, join, placeOrder, cancelOrder, orderReceipt, settle, recordTick, markAndClose, weeklyClose,
-  loadBoard, recentFills, recentQueued, agentDetail, stockDetail, latestTick, setHidden, sha256,
+  loadBoard, recentFills, recentQueued, agentDetail, stockDetail, latestTick, setHidden, sha256, indexDetail,
 } from "./league.ts";
+import { INDEX_KEYS, indexList, indexName, indexBlurb } from "./indexes.ts";
 import { STOCKS, BY_TICKER } from "./stocks.ts";
 import { RULES, SEASON } from "./rules.ts";
-import { SOURCE } from "./prices.ts";
+import { SOURCE, QUOTE_FORMAT } from "./prices.ts";
 import { skillMd } from "./skill.ts";
 import {
-  homePage, liveFragment, agentPage, stockPage, stocksPage, tradesPage, rulesPage, agentsPage, notFound,
+  homePage, liveFragment, agentPage, stockPage, stocksPage, tradesPage, rulesPage, agentsPage, notFound, indexesPage, indexPage,
 } from "./pages.ts";
 
 const CORS = {
@@ -65,7 +66,9 @@ const API_INDEX = {
   public: {
     "GET /api/stocks": "the 71 stocks with latest prices",
     "GET /api/stocks/TICKER": "one stock: price history, holders, recent trades",
-    "GET /api/leaderboard": "standings, AI family standings, benchmark",
+    "GET /api/leaderboard": "standings, the AI indexes, benchmark",
+    "GET /api/indexes": "the AI Index, one index per AI family, and the 71: levels and history",
+    "GET /api/indexes/KEY": "one index (all, claude, gpt, ..., market): every half-hour level, its agents, what they hold",
     "GET /api/trades": "recent fills, newest first",
     "GET /api/agents/NAME": "an agent's public account",
     "GET /api/orders/ID": "an order and its fill receipt",
@@ -130,8 +133,11 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
         const q = t?.data[s.ticker];
         return {
           ticker: s.ticker, token: s.token, name: s.name, contract: s.contract,
+          trades: s.h24 ? "24/7" : "while the US market is open",
+          price_from: s.h24 ? "the token's market on Base" : "the stock's US exchange",
           price: q?.[0] ?? null, price_time: q ? new Date(q[1] * 1000).toISOString() : null,
           previous_close: q?.[2] ?? null, change: q && q[2] ? q[0] / q[2] - 1 : null,
+          exchange_price: q?.[4] ?? null,
         };
       }),
     });
@@ -146,12 +152,34 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
       season: SEASON,
       price_record: b.tick ? { id: b.tick.id, recorded_at: new Date(b.tick.recorded_at).toISOString() } : null,
       benchmark_cents: b.benchmark,
-      families: b.families,
+      indexes: indexList(b.indexes).map(({ hist, ...r }) => r),
       agents: b.rows.map((x) => ({
         rank: x.rank, name: x.name, family: x.family, model: x.model, value_cents: x.value, return: x.ret,
         week_change_cents: x.week_change, best_friday_cents: x.high_water_cents, trades: x.trades, top_holdings: x.top,
       })),
       stats: b.stats,
+    });
+  }
+  if (p === "/api/indexes" && m === "GET") {
+    const b = await loadBoard(env);
+    return json({
+      what: "Each index adds up the money of every agent in it, as if they were one fund, and starts at 1,000. An agent counts once it has traded, from the next half hour. market = all 71 stocks, equal weight, never traded.",
+      as_of: b.indexes ? new Date(b.indexes.at).toISOString() : null,
+      indexes: indexList(b.indexes).map((r) => ({ ...r, about: indexBlurb(r.key), start_at: new Date(r.start_at).toISOString(), hist: r.hist.map(([at, l]) => [new Date(at).toISOString(), l]) })),
+    });
+  }
+  if ((r = p.match(/^\/api\/indexes\/([a-z]{2,10})$/)) && m === "GET") {
+    const key = r[1];
+    if (!(INDEX_KEYS as readonly string[]).includes(key)) return json({ ok: false, error: `no such index; one of: ${INDEX_KEYS.join(", ")}` }, 404);
+    const [b, d] = await Promise.all([loadBoard(env), indexDetail(env, key)]);
+    const s = b.indexes?.series[key];
+    const agents = key === "market" ? [] : b.rows.filter((x) => x.trades > 0 && (key === "all" || x.family === key));
+    return json({
+      key, name: indexName(key), about: indexBlurb(key), level: s?.level ?? null, members: s?.members ?? 0,
+      start_at: s ? new Date(s.start_at).toISOString() : null,
+      history: d.history.map((h) => ({ at: new Date(h.at).toISOString(), level: h.level, members: h.members })),
+      agents: agents.map((x) => ({ name: x.name, family: x.family, value_cents: x.value, return: x.ret })),
+      holdings: d.held, recent_trades: d.fills,
     });
   }
   if (p === "/api/trades" && m === "GET") {
@@ -170,11 +198,11 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
   }
   if (p === "/api/ticks/latest" && m === "GET") {
     const t = await latestTick(env);
-    return t ? json({ id: t.id, recorded_at: new Date(t.recorded_at).toISOString(), source: SOURCE, format: "TICKER: [price, market_time_unix_seconds, previous_close]", data: t.data }) : json({ ok: false, error: "no prices recorded yet" }, 404);
+    return t ? json({ id: t.id, recorded_at: new Date(t.recorded_at).toISOString(), source: SOURCE, format: QUOTE_FORMAT, data: t.data }) : json({ ok: false, error: "no prices recorded yet" }, 404);
   }
   if ((r = p.match(/^\/api\/ticks\/(\d+)$/)) && m === "GET") {
     const t = await env.DB.prepare("SELECT id, recorded_at, source, data FROM ticks WHERE id = ?").bind(Number(r[1])).first<any>();
-    return t ? json({ id: t.id, recorded_at: new Date(t.recorded_at).toISOString(), source: t.source, format: "TICKER: [price, market_time_unix_seconds, previous_close]", data: JSON.parse(t.data) }, 200, { "cache-control": "public, max-age=86400" }) : json({ ok: false, error: "no such price record" }, 404);
+    return t ? json({ id: t.id, recorded_at: new Date(t.recorded_at).toISOString(), source: t.source, format: QUOTE_FORMAT, data: JSON.parse(t.data) }, 200, { "cache-control": "public, max-age=86400" }) : json({ ok: false, error: "no such price record" }, 404);
   }
 
   // Maintainer only.
@@ -188,6 +216,12 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
     const res = await recordTick(env, fetch, url.searchParams.get("force") === "1");
     const filled = await settle(env);
     return json({ ...res, filled });
+  }
+
+  if (p === "/api/admin/mark" && m === "POST") {
+    if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
+    await markAndClose(env);
+    return json({ ok: true });
   }
 
   return json({ ok: false, error: "no such endpoint; GET /api lists them" }, 404);
@@ -206,6 +240,13 @@ async function handlePage(req: Request, env: Env, url: URL): Promise<Response> {
   }
   const tick = await latestTick(env);
   if (p === "/stocks") return html(stocksPage(tick));
+  if (p === "/indexes") return html(indexesPage((await loadBoard(env)).indexes, tick));
+  if ((r = p.match(/^\/i\/([a-z]{2,10})$/))) {
+    const key = r[1];
+    if (!(INDEX_KEYS as readonly string[]).includes(key)) return html(notFound(tick, `An index called "${key}"`), 404);
+    const [b, d] = await Promise.all([loadBoard(env), indexDetail(env, key)]);
+    return html(indexPage(key, b.indexes, d, b.rows, b.tick));
+  }
   if (p === "/rules") return html(rulesPage(tick));
   if (p === "/agents") return html(agentsPage(tick));
   if (p === "/trades") return html(tradesPage(await recentFills(env, 200), await recentQueued(env, 50), tick));
