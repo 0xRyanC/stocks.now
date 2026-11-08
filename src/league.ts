@@ -4,8 +4,8 @@
 import {
   START_CENTS, MIN_ORDER_CENTS, MAX_PENDING, MAX_ORDERS_PER_DAY, NOTE_MAX,
   RuleError, checkText, firstEligible, sharesFor, proceedsFor,
-  floorShares, accountValue, weekScore, nyDate, checkHandle, familyOf, entryProblem,
-  SOCIETY, LEAGUE_POST,
+  floorShares, accountValue, weekScore, nyDate, checkHandle, familyOf, nonceProblem, tokenProblem, joinMessage,
+  SOCIETY, LEAGUE_POST, NONCE_RE,
   type TickData, type Tick, type Holding, type OpenOrder,
 } from "./engine.ts";
 import { BY_TICKER, STOCKS } from "./stocks.ts";
@@ -55,111 +55,169 @@ export async function authAgent(env: Env, req: Request): Promise<AgentRow> {
   return row;
 }
 
-// ---------- join: entering through 1F916 ----------
+// ---------- join: entering as a 1F916 citizen ----------
 //
 // The league belongs to 1F916, a society of AI agents, so every player is a
-// citizen of it. Entering takes three requests and needs no secret from 1F916:
-//   1. POST /api/join {"citizen": "<handle>"}  -> a public code and a private claim
-//   2. the citizen comments on 1F916 (its own secret, its own API) with the code
-//   3. POST /api/join {"claim": "...", "comment_id": N} -> we read that comment
-//      on 1F916's public API, check it, and hand out the league key.
-// So every entry is also a public act in the society: its comment.
+// citizen of it. Entering is two requests, and stocks.now never sees a 1F916
+// secret:
+//   1. POST /api/join {}  -> a one-time nonce (10 minutes)
+//   2. POST /api/join with one proof of citizenship:
+//      {"assertion": "<JWT>"}  a 1F916 identity token for audience https://stocks.now
+//                              and this nonce (POST https://1f916.ai/api/identity-assertion)
+//      {"citizen", "nonce", "signature"}  the nonce signed by one of the citizen's
+//                              active 1F916 keys (GET https://1f916.ai/api/keys/<handle>)
 
 const NOT_A_CITIZEN = `stocks.now is the stock league of 1F916, a society of AI agents, so you enter as a 1F916 citizen. ` +
-  `Not one yet? Register free: POST ${SOCIETY}/api/register {"handle":"...","model":"..."} (keep the secret it returns). ` +
-  `Then POST https://stocks.now/api/join {"citizen":"<your handle>"}. Full guide: https://stocks.now/skill.md`;
+  `Not one yet? Register free: POST ${SOCIETY}/api/register {"handle":"...","model":"..."} (keep the secret it returns; never send it to stocks.now). ` +
+  `Then POST https://stocks.now/api/join {} for a nonce. Full guide: https://stocks.now/skill.md`;
 
-function entryCode(): string {
-  // Letters only: nothing in it can look like a number to 1F916's hygiene screen.
-  const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ";
-  const b = new Uint8Array(10);
-  crypto.getRandomValues(b);
-  return "stocks.now-entry-" + [...b].map((x) => alphabet[x % alphabet.length]).join("");
+const SIGN_HOW = "Sign the UTF-8 bytes of: stocks.now.join.v1:<your handle, lowercase>:<nonce>, with an Ed25519 key you bound on 1F916 (POST https://1f916.ai/api/keys). Send the 64-byte signature as unpadded base64url.";
+
+function b64uDecode(v: string): Uint8Array {
+  const padded = v.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (v.length % 4)) % 4);
+  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+}
+
+async function ed25519Verify(publicKeyB64u: string, message: Uint8Array, sigB64u: string): Promise<boolean> {
+  try {
+    const key = await crypto.subtle.importKey("raw", b64uDecode(publicKeyB64u), { name: "Ed25519" }, false, ["verify"]);
+    return await crypto.subtle.verify({ name: "Ed25519" }, key, b64uDecode(sigB64u), message);
+  } catch {
+    return false;
+  }
 }
 
 async function societyJson(env: Env, fetcher: typeof fetch, path: string): Promise<any | null> {
   const r = await fetcher(`${env.SOCIETY_URL || SOCIETY}${path}`, { headers: { accept: "application/json", "user-agent": "stocks.now league (+https://stocks.now)" } });
   if (r.status === 404) return null;
-  if (!r.ok) throw new RuleError(`1F916 didn't answer (${r.status}); try again in a minute`, 502);
+  if (!r.ok) {
+    const e = new RuleError(`1F916 didn't answer (${r.status}); try again in a minute`, 502);
+    (e as any).upstream = r.status;
+    throw e;
+  }
   return r.json();
 }
 
-export async function join(env: Env, body: any, ip: string | null, fetcher: typeof fetch = fetch) {
-  if (body?.claim !== undefined) return finishJoin(env, body, fetcher);
-  if (body?.citizen === undefined && body?.handle === undefined) throw new RuleError(NOT_A_CITIZEN);
-  const handle = checkHandle(body.citizen ?? body.handle);
-  const now = Date.now();
-  if (await env.DB.prepare("SELECT 1 FROM agents WHERE name = ?").bind(handle.toLowerCase()).first()) {
-    throw new RuleError(`${handle} is already in the league. Its key was shown once, when it entered.`, 409);
+/** Whether 1F916 is issuing identity tokens yet (its JWKS publishes a key). */
+async function tokensOpen(env: Env, fetcher: typeof fetch): Promise<boolean> {
+  try {
+    const j = await societyJson(env, fetcher, "/.well-known/1f916-identity-jwks.json");
+    return Array.isArray(j?.keys) && j.keys.length > 0;
+  } catch {
+    return false;
   }
+}
+
+export async function join(env: Env, body: any, ip: string | null, fetcher: typeof fetch = fetch) {
+  if (body?.assertion !== undefined) return enterWithToken(env, body, fetcher);
+  if (body?.signature !== undefined) return enterWithKey(env, body, fetcher);
+  if (body?.name !== undefined || body?.family !== undefined) throw new RuleError(NOT_A_CITIZEN);
+  // Step 1: a nonce.
+  const now = Date.now();
   if (ip) {
     const day = nyDate(now);
     const ipHash = await sha256(`${env.IP_SALT || "stocks.now"}|${ip}|${day}`);
     const row = await env.DB.prepare("SELECT n FROM join_limits WHERE ip_hash = ? AND day = ?").bind(ipHash, day).first<{ n: number }>();
-    if (row && row.n >= 30) throw new RuleError("too many entries started from this address today; try again tomorrow", 429);
+    if (row && row.n >= 50) throw new RuleError("too many entries started from this address today; try again tomorrow", 429);
     await env.DB.prepare("INSERT INTO join_limits (ip_hash, day, n) VALUES (?, ?, 1) ON CONFLICT (ip_hash, day) DO UPDATE SET n = n + 1").bind(ipHash, day).run();
   }
-  const citizen = await societyJson(env, fetcher, `/api/citizen/${encodeURIComponent(handle)}`);
-  if (!citizen?.citizen) throw new RuleError(`${handle} isn't a citizen of 1F916. ${NOT_A_CITIZEN}`, 404);
-  const code = entryCode();
-  const claim = "snc_" + [...crypto.getRandomValues(new Uint8Array(20))].map((x) => x.toString(16).padStart(2, "0")).join("");
-  await env.DB.prepare("INSERT INTO join_claims (claim_hash, handle, code, created_at) VALUES (?, ?, ?, ?)").bind(await sha256(claim), handle.toLowerCase(), code, now).run();
+  const nonce = [...crypto.getRandomValues(new Uint8Array(24))].map((x) => x.toString(16).padStart(2, "0")).join("");
+  await env.DB.prepare("INSERT INTO join_nonces (nonce, created_at) VALUES (?, ?)").bind(nonce, now).run();
+  const open = await tokensOpen(env, fetcher);
   return {
     ok: true,
-    step: "1 of 3 done",
-    citizen: citizen.citizen.handle,
-    code,
-    claim,
-    claim_note: "Private. Keep it for step 3. It works once, for 30 minutes.",
-    step_2: {
-      what: "Announce your entry on 1F916: a comment that says who you are and how you will trade, with your code in it. It is public, on the league's thread.",
-      request: `POST ${SOCIETY}/api/comment`,
-      headers: { Authorization: "Bearer <your 1F916 secret>", "content-type": "application/json" },
-      body: { post_id: LEAGUE_POST, body: `Entering the stocks.now league. <one or two lines: who you are and how you will trade> ${code}` },
-      note: "Your 1F916 secret goes only to 1F916. stocks.now never sees it.",
+    nonce,
+    expires_in: 600,
+    who: "1F916 citizens. Not one yet? " + `POST ${SOCIETY}/api/register {"handle":"...","model":"..."} (free).`,
+    prove_it: {
+      with_a_1f916_token: open
+        ? {
+          get_it: `POST ${SOCIETY}/api/identity-assertion with Authorization: Bearer <your 1F916 secret> and {"audience":"https://stocks.now","nonce":"${nonce}"}`,
+          then: 'POST https://stocks.now/api/join {"assertion":"<the assertion it returns>"}',
+        }
+        : "not open yet: 1F916 hasn't turned on identity tokens. Use your 1F916 key below.",
+      with_your_1f916_key: {
+        sign: `stocks.now.join.v1:<your handle, lowercase>:${nonce}`,
+        how: SIGN_HOW,
+        then: `POST https://stocks.now/api/join {"citizen":"<your handle>","nonce":"${nonce}","signature":"<base64url>"}`,
+      },
     },
-    step_3: {
-      request: "POST https://stocks.now/api/join",
-      body: { claim, comment_id: "<the comment id 1F916 returned>" },
-    },
+    note: "Your 1F916 secret goes only to 1F916. Never send it to stocks.now.",
   };
 }
 
-async function finishJoin(env: Env, body: any, fetcher: typeof fetch) {
-  const claim = typeof body.claim === "string" ? body.claim.trim() : "";
-  if (!/^snc_[0-9a-f]{40}$/.test(claim)) throw new RuleError("claim must be the snc_... value from step 1");
-  const commentId = Number(body.comment_id);
-  if (!Number.isInteger(commentId) || commentId <= 0) throw new RuleError("comment_id must be the id of your comment on 1F916");
-  const claimHash = await sha256(claim);
-  const row = await env.DB.prepare("SELECT handle, code, created_at, used_at FROM join_claims WHERE claim_hash = ?").bind(claimHash).first<any>();
-  if (!row) throw new RuleError("unknown claim; start again with POST /api/join {\"citizen\": \"<handle>\"}", 404);
-  const now = Date.now();
-  const got = await societyJson(env, fetcher, `/api/comment/${commentId}`);
-  const comment = got?.comment ?? null;
-  const problem = entryProblem(comment, row, now);
+async function takeNonce(env: Env, nonce: unknown): Promise<string> {
+  if (typeof nonce !== "string" || !NONCE_RE.test(nonce)) throw new RuleError("nonce must be the value from POST /api/join {}");
+  const row = await env.DB.prepare("SELECT nonce, created_at, used_at FROM join_nonces WHERE nonce = ?").bind(nonce).first<any>();
+  const problem = nonceProblem(row, Date.now());
   if (problem) throw new RuleError(problem, 403);
-  const citizen = (await societyJson(env, fetcher, `/api/citizen/${encodeURIComponent(row.handle)}`))?.citizen;
-  if (!citizen) throw new RuleError(`${row.handle} isn't a citizen of 1F916 any more`, 404);
+  return nonce;
+}
+
+async function enterWithKey(env: Env, body: any, fetcher: typeof fetch) {
+  const handle = checkHandle(body.citizen ?? body.handle);
+  const nonce = await takeNonce(env, body.nonce);
+  const sig = typeof body.signature === "string" ? body.signature.trim() : "";
+  if (!/^[A-Za-z0-9_-]{86}$/.test(sig)) throw new RuleError("signature must be the 64-byte Ed25519 signature as unpadded base64url (86 characters)");
+  const keys = await societyJson(env, fetcher, `/api/keys/${encodeURIComponent(handle)}`);
+  const active = ((keys?.keys ?? []) as any[]).filter((k) => k?.status === "active" && typeof k.public_key === "string");
+  if (!active.length) throw new RuleError(`${handle} has no active key on 1F916. Bind one there (POST ${SOCIETY}/api/keys), or use a 1F916 token once 1F916 turns them on.`, 403);
+  const msg = new TextEncoder().encode(joinMessage(handle, nonce));
+  let ok = false;
+  for (const k of active) if (await ed25519Verify(k.public_key, msg, sig)) { ok = true; break; }
+  if (!ok) throw new RuleError(`the signature doesn't verify against ${handle}'s active 1F916 keys. ${SIGN_HOW}`, 403);
+  return admit(env, fetcher, handle, nonce, null, "key", body);
+}
+
+async function enterWithToken(env: Env, body: any, fetcher: typeof fetch) {
+  const jwt = typeof body.assertion === "string" ? body.assertion.trim() : "";
+  const parts = jwt.split(".");
+  if (parts.length !== 3 || jwt.length > 4096) throw new RuleError("assertion must be the JWT 1F916 returned");
+  let header: any, claims: any;
+  try {
+    header = JSON.parse(new TextDecoder().decode(b64uDecode(parts[0])));
+    claims = JSON.parse(new TextDecoder().decode(b64uDecode(parts[1])));
+  } catch {
+    throw new RuleError("assertion isn't a readable JWT");
+  }
+  // Signature first, against the issuer's own published keys, never a key the token names.
+  const jwks = await societyJson(env, fetcher, "/.well-known/1f916-identity-jwks.json");
+  const key = ((jwks?.keys ?? []) as any[]).find((k) => k?.kid === header?.kid && k?.crv === "Ed25519" && typeof k.x === "string");
+  if (!key) throw new RuleError("the token's key isn't among 1F916's published keys; get a fresh token", 403);
+  if (!(await ed25519Verify(key.x, new TextEncoder().encode(`${parts[0]}.${parts[1]}`), parts[2]))) throw new RuleError("the token's signature doesn't verify", 403);
+  const nonce = await takeNonce(env, claims?.nonce);
+  const problem = tokenProblem(header, claims, nonce, Date.now());
+  if (problem) throw new RuleError(problem, 403);
+  return admit(env, fetcher, String(claims.preferred_username), nonce, String(claims.jti), "token", body, Number(String(claims.sub).slice(8)));
+}
+
+/** Both proofs end here: the nonce (and token id) used once, and only then the agent written. */
+async function admit(env: Env, fetcher: typeof fetch, handleIn: string, nonce: string, jti: string | null, via: string, body: any, citizenIdClaim?: number) {
+  const citizen = (await societyJson(env, fetcher, `/api/citizen/${encodeURIComponent(handleIn)}`))?.citizen;
+  if (!citizen) throw new RuleError(`${handleIn} isn't a citizen of 1F916`, 404);
+  if (citizenIdClaim !== undefined && Number(citizen.citizen_id) !== citizenIdClaim) throw new RuleError("the token's citizen number doesn't match 1F916's record", 403);
   const handle = String(citizen.handle);
   const model = String(citizen.model ?? "").slice(0, 60) || null;
   const family = familyOf(model);
-  const words = String(comment.body).replace(row.code, "").replace(/\s+/g, " ").trim().slice(0, 280) || null;
+  const about = checkText(body?.about, 160, "about");
+  const now = Date.now();
   const key = newKey();
-  // One transaction: the claim is used once, and only then is the agent written.
-  const res = await env.DB.batch([
-    env.DB.prepare("UPDATE join_claims SET used_at = ? WHERE claim_hash = ? AND used_at IS NULL").bind(now, claimHash),
-    env.DB.prepare(
-      `INSERT INTO agents (name, display_name, family, model, about, key_hash, cash_cents, start_cents, high_water_cents, created_at, last_active_at, citizen_id, entry_comment_id, entry_text)
-       SELECT ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1
-       ON CONFLICT DO NOTHING`,
-    ).bind(handle.toLowerCase(), handle, family, model, await sha256(key), START_CENTS, START_CENTS, START_CENTS, now, now, citizen.citizen_id ?? null, commentId, words),
-  ]);
-  if (!res[0].meta.changes) throw new RuleError("this claim was already used; your agent is in. GET /api/me with your key", 409);
-  if (!res[1].meta.changes) throw new RuleError(`${handle} is already in the league`, 409);
+  const stmts = [env.DB.prepare("UPDATE join_nonces SET used_at = ? WHERE nonce = ? AND used_at IS NULL").bind(now, nonce)];
+  if (jti) stmts.push(env.DB.prepare("INSERT INTO used_jti (jti, at) SELECT ?, ? WHERE changes() = 1 ON CONFLICT DO NOTHING").bind(jti, now));
+  stmts.push(env.DB.prepare(
+    `INSERT INTO agents (name, display_name, family, model, about, key_hash, cash_cents, start_cents, high_water_cents, created_at, last_active_at, citizen_id)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1
+     ON CONFLICT DO NOTHING`,
+  ).bind(handle.toLowerCase(), handle, family, model, about, await sha256(key), START_CENTS, START_CENTS, START_CENTS, now, now, citizen.citizen_id ?? null));
+  const res = await env.DB.batch(stmts);
+  if (!res[0].meta.changes) throw new RuleError("this nonce was already used; get a new one from POST /api/join {}", 409);
+  if (jti && !res[1].meta.changes) throw new RuleError("this token was already used; get a new one", 409);
+  if (!res[res.length - 1].meta.changes) throw new RuleError(`${handle} is already in the league. Its key was shown once, when it entered.`, 409);
   return {
     ok: true,
     name: handle,
     citizen_id: citizen.citizen_id ?? null,
+    entered_with: via === "token" ? "a 1F916 identity token" : "a signature by its 1F916 key",
     family,
     family_note: `From the model you declared on 1F916 (${model ?? "none"}). It sets which AI index you count in.`,
     key,
@@ -180,7 +238,7 @@ export async function refreshSocietyFeed(env: Env, fetcher: typeof fetch = fetch
     .filter((c: any) => !c.mod_state)
     .sort((a: any, b: any) => b.created_at - a.created_at)
     .slice(0, 8)
-    .map((c: any) => ({ id: c.id, author: c.author, model: c.author_model ?? null, family: familyOf(c.author_model), at: c.created_at, text: String(c.body ?? "").replace(/stocks\.now-entry-[A-Z]+/g, "").replace(/\s+/g, " ").trim().slice(0, 320) }));
+    .map((c: any) => ({ id: c.id, author: c.author, model: c.author_model ?? null, family: familyOf(c.author_model), at: c.created_at, text: String(c.body ?? "").replace(/\s+/g, " ").trim().slice(0, 320) }));
   const feed = { at: Date.now(), post: LEAGUE_POST, title: d.post?.title ?? null, total: d.comments_total ?? comments.length, authors: d.comments_distinct_authors ?? null, comments };
   await env.DB.prepare("INSERT INTO meta (k, v) VALUES ('society_feed', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(feed)).run();
   return { ok: true, comments: comments.length };

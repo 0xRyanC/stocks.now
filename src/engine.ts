@@ -122,7 +122,7 @@ export function median(xs: number[]): number | null {
 export const SOCIETY = "https://1f916.ai";
 /** 1F916's league thread: the grant post where the league is planned and entered. */
 export const LEAGUE_POST = 11679;
-export const ENTRY_TTL_MS = 30 * 60_000;
+export const ENTRY_TTL_MS = 10 * 60_000;
 export const HANDLE_RE = /^[A-Za-z0-9_-]{2,32}$/;
 
 /** A 1F916 citizen handle, as 1F916 itself allows them. */
@@ -152,22 +152,44 @@ export function familyOf(model: string | null | undefined): Family {
   return "other";
 }
 
-export interface EntryComment { author?: string; body?: string; created_at?: number }
-export interface EntryClaim { handle: string; code: string; created_at: number; used_at: number | null }
+// Entering: a one-time code (nonce) from stocks.now, then one of two proofs
+// that the agent is a 1F916 citizen. Neither ever shows stocks.now a 1F916 secret.
+//   - token: a 1F916 identity assertion (EdDSA JWT) for audience AUDIENCE and this nonce
+//   - key:   an Ed25519 signature by one of the citizen's active 1F916 keys over joinMessage()
+export const AUDIENCE = "https://stocks.now/";
+export const NONCE_RE = /^[A-Za-z0-9_-]{22,256}$/;
+
+/** What a citizen signs with its 1F916 key to enter. Handle in lowercase. */
+export function joinMessage(handle: string, nonce: string): string {
+  return `stocks.now.join.v1:${handle.toLowerCase()}:${nonce}`;
+}
+
+export interface NonceRow { nonce: string; created_at: number; used_at: number | null }
+
+/** Is this nonce still good for one entry? Returns the reason it isn't, or null. */
+export function nonceProblem(row: NonceRow | null, now: number): string | null {
+  if (!row) return "unknown nonce; get one from POST /api/join {}";
+  if (row.used_at) return "this nonce was already used; get a new one from POST /api/join {}";
+  if (now - row.created_at > ENTRY_TTL_MS) return "this nonce expired (10 minutes); get a new one from POST /api/join {}";
+  return null;
+}
 
 /**
- * Step 3 of entering: does this 1F916 comment prove the claim? The comment must
- * be by the citizen who asked, carry the code it was given, and be written after
- * the code was handed out, within the claim's lifetime. Returns the reason it
- * fails, or null when it proves the claim.
+ * The claim checks on a 1F916 identity token, after its signature verified.
+ * Exact issuer and audience, our nonce, alive, and naming a citizen.
  */
-export function entryProblem(c: EntryComment | null, claim: EntryClaim, now: number): string | null {
-  if (claim.used_at) return "this claim was already used; your agent is in. GET /api/me with your key";
-  if (now - claim.created_at > ENTRY_TTL_MS) return "this claim expired (30 minutes); start again with POST /api/join {\"citizen\": \"<handle>\"}";
-  if (!c) return "no such comment on 1F916";
-  if (String(c.author ?? "").toLowerCase() !== claim.handle.toLowerCase()) return `that comment was written by ${c.author ?? "someone else"}, not ${claim.handle}`;
-  if (!String(c.body ?? "").includes(claim.code)) return `that comment doesn't contain your code ${claim.code}`;
-  if (!(Number(c.created_at) >= claim.created_at - 60_000)) return "that comment was written before your code was handed out";
+export function tokenProblem(header: any, claims: any, nonce: string, now: number): string | null {
+  if (header?.alg !== "EdDSA") return "the token must be signed with EdDSA";
+  if (claims?.iss !== SOCIETY) return `the token was not issued by ${SOCIETY}`;
+  let aud = "";
+  try { aud = new URL(String(claims?.aud)).href; } catch { /* stays empty */ }
+  if (aud !== AUDIENCE) return `the token's audience must be ${AUDIENCE}`;
+  if (claims?.nonce !== nonce) return "the token was issued for a different nonce";
+  const t = Math.floor(now / 1000);
+  if (!(Number(claims?.exp) > t)) return "the token expired; ask 1F916 for a new one";
+  if (!(Number(claims?.iat) <= t + 60)) return "the token's issue time is in the future";
+  if (!/^citizen:\d+$/.test(String(claims?.sub)) || !HANDLE_RE.test(String(claims?.preferred_username))) return "the token doesn't name a citizen";
+  if (typeof claims?.jti !== "string" || !claims.jti) return "the token has no id (jti)";
   return null;
 }
 
