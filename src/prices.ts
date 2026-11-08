@@ -13,8 +13,9 @@ export async function fetchQuotes(fetcher: typeof fetch = fetch): Promise<{ data
   const chunks: string[][] = [];
   for (let i = 0; i < tickers.length; i += 20) chunks.push(tickers.slice(i, i + 20));
   const data: TickData = {};
-  await Promise.all(chunks.map(async (chunk) => {
-    const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${chunk.join(",")}&range=1d&interval=5m`;
+  const errors: string[] = [];
+  await Promise.all(chunks.map(async (chunk) => { try {
+    const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${chunk.join(",")}&range=1d&interval=1d`;
     const r = await fetcher(url, { headers: { "user-agent": UA, accept: "application/json" } });
     if (!r.ok) throw new Error(`price source answered ${r.status} for ${chunk[0]}..`);
     const j = (await r.json()) as any;
@@ -25,7 +26,9 @@ export async function fetchQuotes(fetcher: typeof fetch = fetch): Promise<{ data
       const prev = Number(m?.chartPreviousClose ?? m?.previousClose);
       if (res?.symbol && price > 0 && t > 0) data[res.symbol] = [price, t, prev > 0 ? prev : null];
     }
-  }));
+  } catch (e: any) { errors.push(String(e?.message || e)); } }));
+  // One failed request shouldn't stop the others; its stocks just carry their last price.
+  if (errors.length === chunks.length) throw new Error("price source failed: " + errors.join("; "));
   const missing = tickers.filter((t) => !data[t]);
   return { data, missing };
 }

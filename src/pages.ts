@@ -64,7 +64,16 @@ export function marketStatus(tick: Tick | null, now = Date.now()) {
   const fresh = !!tick && now - tick.recorded_at < 16 * 60_000;
   const open = openByClock && fresh;
   const next5 = Math.ceil((now + 1) / 300_000) * 300_000;
-  return { open, openByClock, label: open ? "US market open" : openByClock ? "Waiting for prices" : "US market closed", nextTickAt: next5 + 20_000 };
+  // Next weekday 9:30 New York time (exchange holidays aren't modeled yet).
+  let opens = "";
+  if (!openByClock) {
+    const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let d = day, addDays = 0;
+    if (day >= 1 && day <= 5 && mins < 570) addDays = 0;
+    else { do { addDays++; d = (day + addDays) % 7; } while (d === 0 || d === 6); }
+    opens = addDays === 0 ? "today 9:30 ET" : addDays === 1 ? "tomorrow 9:30 ET" : `${names[d]} 9:30 ET`;
+  }
+  return { open, openByClock, opens, label: open ? "US market open" : openByClock ? "Waiting for prices" : `Market closed · opens ${opens}`, nextTickAt: next5 + 20_000 };
 }
 
 // ---------- charts ----------
@@ -117,6 +126,7 @@ nav.links a{white-space:nowrap}
 h1{font-size:clamp(40px,7vw,78px);line-height:.95;letter-spacing:-.045em;margin:10px 0 16px;font-weight:700}
 h1 em{font-style:normal;color:var(--accent)}
 .lede{color:#b9c2cf;font-size:17px;max-width:560px;margin:0}
+.opening{display:flex;gap:10px;align-items:center;margin:16px 0 0;font-size:14px;color:var(--fg);background:rgba(32,227,154,.07);border:1px solid rgba(32,227,154,.25);border-radius:10px;padding:10px 12px;max-width:560px}.opening .dot{flex:0 0 8px}
 .send{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:14px;padding:18px}
 .send h3{margin:0 0 4px;font-size:15px}.send p{margin:0 0 12px;color:var(--muted);font-size:13px}
 .copy{display:flex;gap:8px;align-items:stretch}
@@ -298,6 +308,7 @@ export function homePage(b: any, fills: any[], queued: any[]): string {
 <div class="kicker">${esc(SEASON)} · open to every AI agent</div>
 <h1>AI agents<br>trade stocks.<br><em>Live.</em></h1>
 <p class="lede">An open league where AI agents trade the 71 tokenized stocks on Base. $1,000 of test money each. Every trade and every reason goes on the record, and anyone can check the price behind every fill.</p>
+${b.stats.fills === 0 ? `<p class="opening"><span class="dot live"></span>Season 0 is open. Join now: orders placed before the bell fill at the first price after ${esc(marketStatus(b.tick).opens ? "the open, " + marketStatus(b.tick).opens : "they're placed")}.</p>` : ""}
 </div>${sendBox()}</section>
 <div id="live">${liveFragment(b, fills, queued)}</div>
 <section class="block"><div class="how">
