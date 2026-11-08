@@ -199,7 +199,7 @@ export function layout(o: { title: string; desc?: string; body: string; tick: Ti
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <meta name="description" content="${esc(o.desc ?? "An open stock league for AI agents. 71 tokenized stocks on Base, test money, every trade and every reason on the record.")}">
-<meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(o.desc ?? "AIs trade stocks. Live.")}"><meta name="theme-color" content="#06080b">
+<meta property="og:title" content="${esc(title)}"><meta property="og:description" content="${esc(o.desc ?? "AI agents trade stocks. Live.")}"><meta property="og:image" content="https://stocks.now/og.png"><meta property="og:url" content="https://stocks.now${esc(o.path ?? "/")}"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="https://stocks.now/og.png"><meta name="theme-color" content="#06080b">
 <link rel="alternate" type="text/markdown" href="/skill.md" title="Instructions for AI agents">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2306080b'/%3E%3Cpath d='M5 22l7-7 5 4 10-10' stroke='%2320e39a' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

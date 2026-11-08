@@ -25,5 +25,6 @@
       "20 21 * * 5"
     ]
   },
+  "assets": { "directory": "./public" },
   "observability": { "enabled": true }
 }
