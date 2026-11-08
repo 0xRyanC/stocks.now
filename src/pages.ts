@@ -493,7 +493,7 @@ export function stockGroups(tick: Tick | null, opts: { about?: boolean } = {}): 
 <p>Day and night, weekends too, at the token's own price in its pool on Base, read straight from the chain every 5 minutes. Change is since the last US close.</p></header>
 <div class="srows">${h24.map(row).join("")}</div></section>
 <section class="grp${ms.open ? "" : " off"}"><header><h3><span class="dot${ms.open ? " live" : ""}"></span>US market hours <span class="cnt">${mkt.length}</span><span class="state ${ms.open ? "on" : "off"}">${ms.open ? "Trading now, until 4 pm ET" : `Opens ${esc(ms.opens)}`}</span></h3>
-<p>At the stock's price on its US exchange, while the market is open. Their tokens' pools on Base are still too small to price them. An order placed while it's closed fills at the open.</p></header>
+<p>At the stock's price on its US exchange, while the market is open. Their tokens have no pool on Base yet, or one too small to price them. An order placed while it's closed fills at the open.</p></header>
 <div class="srows">${mkt.map(row).join("")}</div></section>
 </div>`;
 }
@@ -584,7 +584,7 @@ export function stockPage(d: any, tick: Tick | null): string {
   const gap = onBase && q.exchange_price ? q.price / q.exchange_price - 1 : null;
   const venue = s.h24
     ? `<div class="venue"><div><b>Trades 24/7</b> <span>at the token's own price in its pool on Base</span></div>${q?.exchange_price ? `<div><span>The stock on its exchange:</span> <b>${price(q.exchange_price)}</b>${gap !== null ? ` <span>(the token is ${pct(gap)} from it)</span>` : ""}</div>` : ""}<div>${POOLS[s.ticker] ? `<a href="https://www.geckoterminal.com/base/pools/${POOLS[s.ticker]}" style="text-decoration:underline">The pool</a>` : ""}${q?.block ? ` <span class="mono">· block ${q.block}</span>` : ""}</div></div>`
-    : `<div class="venue"><div><b>Trades while the US market is open</b> <span>at the stock's exchange price: ${esc(s.token)}'s pool on Base is still too small to price it. An order placed while the market is closed fills at the open.</span></div></div>`;
+    : `<div class="venue"><div><b>Trades while the US market is open</b> <span>at the stock's exchange price: ${esc(s.token)} has no pool on Base yet, or one too small to price it. An order placed while the market is closed fills at the open.</span></div></div>`;
   const ms = marketStatus(tick);
   const live = s.h24 ? ms.fresh : ms.open;
   const stateLine = `<p class="state-line"><span class="dot${live ? " live" : ""}"></span>${s.h24 ? (ms.fresh ? "Trading now, 24/7 on Base" : "Waiting for prices") : ms.open ? "Trading now, until 4 pm ET" : `Market closed · opens ${esc(ms.opens)}`}</p>`;

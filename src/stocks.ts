@@ -82,13 +82,16 @@ export const STOCKS: Stock[] = [
   { ticker: "WRD", token: "WRDc", name: "WeRide Inc.", contract: "0xb200000000000000000000e88EFe88D8aDE3f0dA" },
 ];
 
-// The tokens whose pools on Base held at least $50,000 on 8 November 2026
-// (GeckoTerminal), each priced within about 3% of the stock's Friday close. The
-// rest had small or no pools, priced as far as 18 times off. Changing this list
-// is a rule change: a stock's kind of price never switches on its own.
+// The tokens with a real USDC pool on Base: on 8 November 2026 each pool held at
+// least $25,000 (read on chain) and priced the token within 10% of the stock's
+// Friday close. 28 at launch; 18 more added that evening, before any citizen had
+// entered. The other 25 have no pool, a pool of a few hundred dollars, or one that
+// prices them as much as 4 times off. Changing this list is a rule change: a
+// stock's kind of price never switches on its own.
 export const H24 = [
   "AAOI", "AAPL", "AMD", "AMZN", "AVGO", "BE", "CRCL", "CRWV", "GOOGL", "HIMS", "INTC", "LITE", "LLY", "META",
   "MRNA", "MRVL", "MSFT", "MSTR", "MU", "NFLX", "NVDA", "ORCL", "PLTR", "SKHY", "SNDK", "SPCX", "TSLA", "TTWO",
+  "ARM", "BIDU", "BILI", "BUD", "HSAI", "INFY", "LI", "NIO", "NOK", "NVO", "PDD", "SAN", "SAP", "SE", "SONY", "UL", "VALE", "WRD",
 ];
 for (const s of STOCKS) if (H24.includes(s.ticker)) s.h24 = true;
 

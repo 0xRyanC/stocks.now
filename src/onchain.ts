@@ -1,5 +1,6 @@
 // Prices read straight from Base. Each 24/7 stock's token trades in an
-// Aerodrome Slipstream pool against USDC (POOLS below). One eth_call to
+// Aerodrome Slipstream pool against USDC (POOLS below; two Slipstream factories,
+// 0x9cb22058... for the first 28 and 0xf8f2eb49... for the 18 added on 8 November). One eth_call to
 // Multicall3 reads, at a single block: the block number and time, and for each
 // pool its current price (slot0) and how much USDC and token it holds.
 //
@@ -15,8 +16,9 @@ const TOKEN_DECIMALS = 8; // every Coinbase tokenized stock on Base
 
 /**
  * Each 24/7 token's main pool on Base: the deepest USDC pool on 8 November 2026
- * (GeckoTerminal), all Aerodrome Slipstream, all with USDC as token0 (checked on
- * chain). Changing a pool is a rule change, like the list itself.
+ * (GeckoTerminal), all Aerodrome Slipstream, all with USDC as token0 and the
+ * Coinbase token as token1 (both checked on chain). Changing a pool is a rule
+ * change, like the list itself.
  */
 export const POOLS: Record<string, string> = {
   AAOI: "0xfb35d41801893197b5a4d477d0bf6737d2ad6106", AAPL: "0xf5fcb9cdafce67d50afef298f88e709d2b946ba6",
@@ -33,6 +35,18 @@ export const POOLS: Record<string, string> = {
   PLTR: "0xa0473ced0cd1bfb857e3e04b5fa4b6af18c5e44d", SKHY: "0xebc746a47ebb274de1dbdc9a465e6c5c2301c5da",
   SNDK: "0x2836e062a3fe75943a7f4a552e2365b98e414e75", SPCX: "0x880db7dda4407d99508574e680d067d1164b3cfe",
   TSLA: "0x7a33000372f3f028f074182ccb9d16cbeefbf920", TTWO: "0x18907cae5a9c7b45f85c5d2e1f7508c27c134f83",
+  // Added 8 November 2026, 23:30 UTC, before any citizen had entered: pools from the
+  // second Slipstream factory, each holding about $45,000-$65,000 and priced within 10%
+  // of the stock's Friday close. New and lightly traded, so the same checks guard them.
+  ARM: "0x9a0f4fd0766ccdb792ba58fe631aa7720097623c", BIDU: "0xd47b8f13ffc3198148b138d3f07cc89c92042950",
+  BILI: "0x32a3ce6c3a8d6c24c4a51a5cf2869410cbf4d637", BUD: "0x5ee52963d3d33196a47fad722abb897e0fa395d9",
+  HSAI: "0xdc8d2c31de17bf4df00c05e4e132bcea22f24c3b", INFY: "0x356cc16fe38a6ad0eb25e655759dd963f8d674bf",
+  LI: "0xd71b2d9cb3532477df77ae26e780963cce784a0c", NIO: "0x484cc2ca594ced3fe38362fe950c60ce66f53f6d",
+  NOK: "0xc541eac49f32d46c1e2f88952f22215ef0f2db71", NVO: "0xc1ba39d668f14eee2462ca5877402e4a7c4d1f34",
+  PDD: "0x84608be6d655ee05032303fe7f0d6f3a51c2cf51", SAN: "0xe531069df73530bf59c954f3718945d5faa2e7df",
+  SAP: "0x21313a06b7f8ed38d8bc1fb8be2fbd847634a6ec", SE: "0x0274e5078033cb3fe788cf76bb97150fd9bc4547",
+  SONY: "0x26dd2ac81ea9a212afc84848893edc21c5a76fdc", UL: "0x013fcb940735d17c81d3b91557acc62da723d9d5",
+  VALE: "0x0f48336b76ee52fa6bb19edf5af358529df57574", WRD: "0xbc440aff9a79cced69d5b21c7b71e60bd0278efb",
 };
 
 /** Public Base RPC endpoints, tried in order. */
