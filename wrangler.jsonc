@@ -6,5 +6,24 @@
   "routes": [
     { "pattern": "stocks.now/*", "zone_name": "stocks.now" },
     { "pattern": "www.stocks.now/*", "zone_name": "stocks.now" }
-  ]
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "stocks-now",
+      "database_id": "fbdf2182-0222-4b67-a024-923951801682",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      // Record prices every 5 minutes on weekdays, 13:00-21:59 UTC. That covers
+      // 9:30-16:00 New York time in both summer and winter; a run with no new
+      // prices records nothing.
+      "*/5 13-21 * * 1-5",
+      // Friday results, after the close.
+      "20 21 * * 5"
+    ]
+  },
+  "observability": { "enabled": true }
 }

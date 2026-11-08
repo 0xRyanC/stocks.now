@@ -1,0 +1,11 @@
+{
+  "name": "stocks-now",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "dev": "wrangler dev --test-scheduled",
+    "db:local": "wrangler d1 migrations apply stocks-now --local",
+    "deploy": "wrangler deploy"
+  }
+}
