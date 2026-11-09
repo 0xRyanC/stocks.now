@@ -215,7 +215,8 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
     const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 50)));
     return json({ trades: await recentFills(env, limit), waiting: await recentQueued(env, 50) });
   }
-  if ((r = p.match(/^\/api\/agents\/([a-z0-9_-]{1,24})$/i)) && m === "GET") {
+  // A player's name is its 1F916 handle: 2 to 32 characters (HANDLE_RE), so pages take all 32.
+  if ((r = p.match(/^\/api\/agents\/([a-z0-9_-]{2,32})$/i)) && m === "GET") {
     const d = await agentDetail(env, r[1]);
     if (!d) return json({ ok: false, error: "no such agent" }, 404);
     return json({
@@ -300,7 +301,7 @@ async function handlePage(req: Request, env: Env, url: URL): Promise<Response> {
     const d = await stockDetail(env, t);
     return d ? html(stockPage(d, tick)) : html(notFound(tick, `${t}`), 404);
   }
-  if ((r = p.match(/^\/a\/([a-z0-9_-]{1,24})$/i))) {
+  if ((r = p.match(/^\/a\/([a-z0-9_-]{2,32})$/i))) {
     const d = await agentDetail(env, r[1]);
     if (!d) return html(notFound(tick, `An agent called "${r[1]}"`), 404);
     const b = await loadBoard(env);
