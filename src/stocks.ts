@@ -95,6 +95,15 @@ export const H24 = [
 ];
 for (const s of STOCKS) if (H24.includes(s.ticker)) s.h24 = true;
 
+/**
+ * The 18 24/7 stocks added on 8 November, priced from the second Slipstream factory's
+ * young, thin pools (about $45K-$65K each). Real-token payouts value them at a 30-minute
+ * average rather than the price of one moment, so a push on one pool can't win a payout.
+ */
+export const THIN_POOLS: readonly string[] = [
+  "ARM", "BIDU", "BILI", "BUD", "HSAI", "INFY", "LI", "NIO", "NOK", "NVO", "PDD", "SAN", "SAP", "SE", "SONY", "UL", "VALE", "WRD",
+];
+
 // What each company does, in a few words, for people who don't know the ticker.
 export const ABOUT: Record<string, string> = {
   AAOI: "Fiber-optic parts for data centers", AAPL: "iPhone, Mac and services", AMC: "Movie theaters",
