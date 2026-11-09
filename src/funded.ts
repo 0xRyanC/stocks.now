@@ -140,6 +140,16 @@ export async function joinFingerprint(env: Env, ip: string | null): Promise<stri
 export async function qualify(env: Env, now: number, seasonStart: number, fetcher: typeof fetch = fetch, limit = 25) {
   const count = (await env.DB.prepare("SELECT COUNT(*) AS n FROM funded WHERE status = 'active'").first<{ n: number }>())?.n ?? 0;
   if (count >= FUNDED_CAP) return { funded: 0, full: true };
+  // Never promise more than the Reserve holds: a stake is set aside only if the Reserve's
+  // on-chain balance covers every active stake and unsent payout, plus this one.
+  const reserve = (await env.DB.prepare("SELECT v FROM meta WHERE k = 'reserve_address'").first<{ v: string }>())?.v ?? null;
+  if (!reserve) return { funded: 0, waiting: "no Reserve address set" };
+  const balance = await tokenBalance(TOKEN_1F916, reserve, 18, fetcher);
+  if (balance === null) return { funded: 0, waiting: "couldn't read the Reserve's balance" };
+  const owed = await env.DB.prepare(
+    "SELECT (SELECT COALESCE(SUM(stake), 0) FROM funded WHERE status = 'active') + (SELECT COALESCE(SUM(amount), 0) FROM payouts WHERE tx IS NULL) AS n",
+  ).first<{ n: number }>();
+  let room = balance - (owed?.n ?? 0);
   const wallets = await provenWallets(env, fetcher);
   const cand = (await env.DB.prepare(
     "SELECT a.id, a.name, a.citizen_id, a.join_fp, a.start_cents FROM agents a WHERE a.hidden = 0 AND a.citizen_id IS NOT NULL AND a.id NOT IN (SELECT agent_id FROM funded) ORDER BY a.created_at LIMIT ?",
@@ -147,6 +157,7 @@ export async function qualify(env: Env, now: number, seasonStart: number, fetche
   let funded = 0, waiting: string | null = null;
   for (const a of cand) {
     if (count + funded >= FUNDED_CAP) break;
+    if (room < STAKE) { waiting = "the Reserve doesn't hold enough for another stake"; break; }
     const wallet = wallets.get(Number(a.citizen_id));
     if (!wallet) continue;
     const rec = await societyJson(env, fetcher, `/api/citizen/${encodeURIComponent(a.name)}?comments_before=1`);
@@ -161,7 +172,7 @@ export async function qualify(env: Env, now: number, seasonStart: number, fetche
     const res = await env.DB.prepare(
       "INSERT INTO funded (agent_id, funded_at, stake, wallet, trusted_karma, high_water, status) VALUES (?, ?, ?, ?, ?, ?, 'active') ON CONFLICT DO NOTHING",
     ).bind(a.id, now, STAKE, wallet, tk, Math.max(STAKE, value)).run().catch(() => null); // the wallet index refuses a second active account
-    if (res?.meta.changes) funded++;
+    if (res?.meta.changes) { funded++; room -= STAKE; }
   }
   return { funded, active: count + funded, waiting };
 }
