@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkReason, REASON_MIN, NOTE_MAX } from "../src/engine.ts";
 import { tallyCensus, lifeOf } from "../src/citizens.ts";
-import { closeAtOrAfter, closeOf, weekKey, callReturn, indexMoves, rankCalls, bestAndWorst, agentWeeks, tweetLine } from "../src/recap.ts";
+import { closeAtOrAfter, closeOf, prevClose, firstClose, currentClose, weekKey, callReturn, indexMoves, rankCalls, bestAndWorst, agentWeeks, tweetLine } from "../src/recap.ts";
 
 test("every trade needs a reason, in public, without links", () => {
   // Kill: return null for a missing note, or drop the REASON_MIN check.
@@ -52,17 +52,30 @@ test("a player's 1F916 life leaves out collapsed posts and keeps the newest thre
   assert.equal(lifeOf({ citizen: { karma: null } })!.karma, null, "unknown karma stays unknown, not 0");
 });
 
-test("a week runs from one Friday 21:20 UTC to the next", () => {
-  // Kill: use getDay (local) instead of getUTCDay, or let a close in the past count.
-  const fri = Date.UTC(2026, 10, 13, 21, 20);
-  assert.equal(closeAtOrAfter(Date.UTC(2026, 10, 8, 22, 0)), fri, "Sunday -> that Friday");
-  assert.equal(closeAtOrAfter(fri), fri, "exactly at the close");
-  assert.equal(closeAtOrAfter(fri + 1), fri + 7 * 86_400_000, "a moment after -> next Friday");
-  assert.equal(weekKey(fri), "2026-11-13");
-  assert.equal(closeOf("2026-11-13"), fri);
-  assert.equal(closeOf("2026-11-12"), null, "Thursday isn't a week");
-  assert.equal(closeOf("2026-02-30"), null);
+test("a week runs from one Monday opening bell (9:30 am New York) to the next", () => {
+  // Kill: close at a fixed UTC hour (ignore daylight time), or let a bell in the past count.
+  const mon = Date.UTC(2026, 10, 16, 14, 30); // Mon Nov 16, 9:30 EST
+  assert.equal(closeAtOrAfter(Date.UTC(2026, 10, 10, 22, 0)), mon, "Tuesday -> next Monday's bell");
+  assert.equal(closeAtOrAfter(mon), mon, "exactly at the bell");
+  assert.equal(closeAtOrAfter(mon + 1), Date.UTC(2026, 10, 23, 14, 30), "a moment after -> the Monday after");
+  assert.equal(closeAtOrAfter(Date.UTC(2026, 10, 16, 3, 0)), mon, "Sunday night in New York (Monday in UTC) -> that morning's bell");
+  assert.equal(weekKey(mon), "2026-11-16");
+  assert.equal(closeOf("2026-11-16"), mon);
+  assert.equal(closeOf("2027-07-12"), Date.UTC(2027, 6, 12, 13, 30), "summer: 9:30 EDT is 13:30 UTC");
+  assert.equal(closeOf("2027-03-15"), Date.UTC(2027, 2, 15, 13, 30), "the Monday after clocks spring forward");
+  assert.equal(prevClose(closeOf("2027-03-15")!), closeOf("2027-03-08"), "a week across the change is 167 hours, not 168");
+  assert.equal(closeOf("2026-11-13"), null, "a Friday isn't a week");
+  assert.equal(closeOf("2027-02-29"), null, "no such date (V8 would roll it to March 1, a Monday)");
   assert.equal(closeOf("../etc"), null);
+});
+
+test("week one is a full week: the first bell at least six days after the season starts", () => {
+  // Kill: make firstClose return closeAtOrAfter(seasonStart) (week one would end the next morning).
+  const season = Date.UTC(2026, 10, 8, 22, 5); // Sunday Nov 8, 5 pm New York
+  assert.equal(firstClose(season), Date.UTC(2026, 10, 16, 14, 30));
+  assert.equal(currentClose(Date.UTC(2026, 10, 9, 3, 0), season), Date.UTC(2026, 10, 16, 14, 30), "tonight's week is the one ending Nov 16");
+  assert.equal(currentClose(Date.UTC(2026, 10, 17, 3, 0), season), Date.UTC(2026, 10, 23, 14, 30), "after it, the normal weekly rhythm");
+  assert.equal(firstClose(Date.UTC(2026, 10, 9, 14, 0)), Date.UTC(2026, 10, 16, 14, 30), "a season starting Monday 9:00 skips that day's bell");
 });
 
 test("a call is judged by where its stock ended: buys gain on a rise, sells on a fall", () => {

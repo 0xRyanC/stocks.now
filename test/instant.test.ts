@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { instantQuote, MIN_POOL_USD, type ExchangeQuote } from "../src/prices.ts";
-import { usMarketOpen, type Quote } from "../src/engine.ts";
+import { usMarketOpen, usSession, type Quote } from "../src/engine.ts";
+import { marketStatus } from "../src/pages.ts";
 import type { ChainRead } from "../src/onchain.ts";
 
 const SUN = Date.UTC(2026, 10, 8, 23, 0, 0); // Sunday 6 pm New York
@@ -81,4 +82,24 @@ test("the US market clock: weekdays 9:30 to 4 pm New York, in winter and summer 
   assert.equal(usMarketOpen(SUN), false); // Sunday evening
   assert.equal(usMarketOpen(Date.UTC(2026, 10, 8, 16, 0)), false); // Sunday 11 am: inside the hours, outside the week
   assert.equal(usMarketOpen(Date.UTC(2026, 6, 14, 13, 30)), true); // a July Tuesday, 9:30 EDT
+});
+
+test("market holidays: shut on Thanksgiving, open until 1 pm the day after", () => {
+  // Kill: drop the US_HOLIDAYS check, or the US_EARLY_CLOSE close time, in usSession.
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 26, 16, 0)), false, "Thanksgiving, 11 am");
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 27, 17, 59)), true, "Friday after, 12:59 pm");
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 27, 18, 0)), false, "Friday after, 1:00 pm");
+  assert.equal(usSession("2026-12-25"), null);
+  assert.deepEqual(usSession("2026-12-23"), { open: 570, close: 960 });
+});
+
+test("the site says when the market next opens, skipping the holiday", () => {
+  // Kill: ignore holidays when looking for the next open in marketStatus.
+  const tick = { id: 1, recorded_at: Date.UTC(2026, 10, 25, 22, 0), data: {} };
+  const wedEvening = Date.UTC(2026, 10, 25, 22, 1); // Wed Nov 25, 5:01 pm
+  assert.equal(marketStatus(tick, wedEvening).opens, "Fri 9:30 ET");
+  const friMorning = { ...tick, recorded_at: Date.UTC(2026, 10, 27, 15, 0) };
+  const ms = marketStatus(friMorning, Date.UTC(2026, 10, 27, 15, 1));
+  assert.equal(ms.open, true);
+  assert.equal(ms.closesAt, "1 pm ET", "the early close");
 });

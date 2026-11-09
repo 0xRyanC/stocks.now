@@ -1,31 +1,68 @@
-// The week on stocks.now: one recap a week, from one Friday close (21:20 UTC,
-// after the US market closes) to the next. Pure functions; league.ts loads the
-// rows and pages.ts draws the page.
+// The week on stocks.now: one recap a week, from one Monday opening bell
+// (9:30 am New York time) to the next. Wall Street sleeps all weekend; the
+// league doesn't, and the week is scored when the bell rings. Pure functions;
+// league.ts loads the rows and pages.ts draws the page.
 
 import { INDEX_BASE } from "./engine.ts";
 
 const DAY = 86_400_000;
 
-/** The Friday close at or after `ms`: Friday 21:20 UTC, when the weekly results are recorded. */
-export function closeAtOrAfter(ms: number): number {
-  const d = new Date(ms);
-  const delta = (5 - d.getUTCDay() + 7) % 7;
-  let t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + delta, 21, 20);
-  if (t < ms) t += 7 * DAY;
-  return t;
+const NY_PARTS = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+
+/**
+ * 9:30 am New York time on the date `key` (YYYY-MM-DD), in UTC ms: 14:30 UTC
+ * under standard time, 13:30 UTC under daylight time. Null for a malformed date.
+ */
+export function bellOn(key: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return null;
+  for (const h of ["14", "13"]) {
+    const t = Date.parse(`${key}T${h}:30:00Z`);
+    if (!Number.isFinite(t) || new Date(t).toISOString().slice(0, 10) !== key) return null; // e.g. Feb 30
+    const p = Object.fromEntries(NY_PARTS.formatToParts(new Date(t)).map((x) => [x.type, x.value]));
+    if (`${p.year}-${p.month}-${p.day}` === key && p.hour === "09" && p.minute === "30") return t;
+  }
+  return null;
 }
 
-/** A week is named by the date of its closing Friday, e.g. "2026-11-13". */
+/** The weekly close at or after `ms`: the next Monday opening bell, 9:30 am New York time. */
+export function closeAtOrAfter(ms: number): number {
+  const d = new Date(ms);
+  for (let i = -1; i <= 8; i++) {
+    const day = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + i));
+    if (day.getUTCDay() !== 1) continue;
+    const t = bellOn(day.toISOString().slice(0, 10));
+    if (t !== null && t >= ms) return t;
+  }
+  throw new Error("no Monday bell within 8 days");
+}
+
+/** A week is named by the date of its closing Monday, e.g. "2026-11-16". */
 export function weekKey(closeMs: number): string {
   return new Date(closeMs).toISOString().slice(0, 10);
 }
 
-/** The close of the week named `key`, or null if `key` isn't a Friday. */
+/** The close of the week named `key`, or null if `key` isn't a Monday. */
 export function closeOf(key: string): number | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return null;
-  const t = Date.parse(key + "T21:20:00Z");
-  if (!Number.isFinite(t) || new Date(t).getUTCDay() !== 5 || weekKey(t) !== key) return null;
+  const t = bellOn(key);
+  if (t === null || new Date(t).getUTCDay() !== 1) return null;
   return t;
+}
+
+/** A season's first close: the first Monday bell at least six days after it starts, so week one is a full week. */
+export function firstClose(seasonStart: number): number {
+  return closeAtOrAfter(seasonStart + 6 * DAY);
+}
+
+/** The week in progress at `now`: never earlier than the season's first close. */
+export function currentClose(now: number, seasonStart: number | null): number {
+  return closeAtOrAfter(seasonStart === null ? now : Math.max(now, firstClose(seasonStart)));
+}
+
+/** The close of the week before the one closing at `end` (a week isn't always 7 x 24 hours: daylight time). */
+export function prevClose(end: number): number {
+  return closeOf(weekKey(end - 7 * DAY))!;
 }
 
 /** How good a call turned out: a buy gains when the price rises after it, a sell when the price falls after it. */

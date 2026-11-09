@@ -1,5 +1,5 @@
 // The league against the database: joining, orders, fills, price records,
-// Friday results and the public reads. Rules come from engine.ts.
+// the Monday weekly close and the public reads. Rules come from engine.ts.
 
 import {
   START_CENTS, MIN_ORDER_CENTS, MAX_PENDING, MAX_ORDERS_PER_DAY,
@@ -13,7 +13,7 @@ import { fetchExchange, fetchBase, buildTick, hasNewPrices, instantQuote, SOURCE
 import { nextIndexes, type IndexSummary } from "./indexes.ts";
 import { POOLS } from "./onchain.ts";
 import { tallyCensus, lifeOf, type Census } from "./citizens.ts";
-import { closeAtOrAfter, closeOf, weekKey, indexMoves, rankCalls, bestAndWorst, agentWeeks, tweetLine } from "./recap.ts";
+import { closeOf, prevClose, firstClose, currentClose, weekKey, indexMoves, rankCalls, bestAndWorst, agentWeeks, tweetLine } from "./recap.ts";
 
 export interface Env {
   DB: D1Database;
@@ -603,8 +603,16 @@ export async function markAndClose(env: Env) {
   await env.DB.batch(stmts);
 }
 
-/** Friday after the close: record each agent's week. Score counts new highs only. Runs once per week. */
+/** Monday at the opening bell: record each agent's week. Score counts new highs only. Runs once per week. */
+/** When the season began: the first scheduled price record. Null before it. */
+export async function seasonStartAt(env: Env): Promise<number | null> {
+  const r = await env.DB.prepare("SELECT t.recorded_at FROM ticks t JOIN meta m ON m.k = 'season_start_tick' AND t.id = CAST(m.v AS INTEGER)").first<{ recorded_at: number }>();
+  return r?.recorded_at ?? null;
+}
+
 export async function weeklyClose(env: Env) {
+  const season = await seasonStartAt(env);
+  if (season === null || Date.now() < firstClose(season) - 10 * 60_000) return { skipped: "the first week is still running" };
   const week = nyDate(Date.now());
   const done = await env.DB.prepare("SELECT 1 FROM weeks WHERE week = ? LIMIT 1").bind(week).first();
   if (done) return { week, skipped: true };
@@ -767,23 +775,23 @@ export async function setHidden(env: Env, name: string, hidden: boolean) {
 
 // ---------- the week ----------
 
-/** Which week a page asks for: a closing Friday's date, or the week in progress. */
-export function currentWeekKey(now = Date.now()): string {
-  return weekKey(closeAtOrAfter(now));
+/** Which week a page asks for: a closing Monday's date, or the week in progress. */
+export function currentWeekKey(seasonStart: number | null, now = Date.now()): string {
+  return weekKey(currentClose(now, seasonStart));
 }
 
 /**
  * The recap of one week: how each AI index moved, who gained and lost, and the
  * best and worst calls, judged by where each stock ended the week.
- * Null if `key` isn't a Friday, or the week ends before the season began.
+ * Null if `key` isn't a Monday, or the week ends before the season began.
  */
 export async function weekRecap(env: Env, key: string, now = Date.now()) {
   const end = closeOf(key);
   if (end === null) return null;
-  const seasonRow = await env.DB.prepare("SELECT t.recorded_at FROM ticks t JOIN meta m ON m.k = 'season_start_tick' AND t.id = CAST(m.v AS INTEGER)").first<{ recorded_at: number }>();
-  const seasonStart = seasonRow?.recorded_at ?? null;
-  if (seasonStart === null || end <= seasonStart) return null;
-  const start = Math.max(end - 7 * 86_400_000, seasonStart);
+  const seasonStart = await seasonStartAt(env);
+  if (seasonStart === null || end < firstClose(seasonStart)) return null;
+  const first = end === firstClose(seasonStart);
+  const start = first ? seasonStart : prevClose(end);
   const closed = now >= end;
   const until = Math.min(end, now);
   const look = start - 6 * 3600_000;
@@ -802,7 +810,7 @@ export async function weekRecap(env: Env, key: string, now = Date.now()) {
   const endPrices: Record<string, number> = {};
   for (const [t, q] of Object.entries(endData)) endPrices[t] = (q as any)[0];
 
-  // The end value: the Friday record once the week is closed, else the live value.
+  // The end value: the bell's record once the week is closed, else the live value.
   const weekMap = new Map((weekRows.results as any[]).map((w) => [w.agent_id, w]));
   let live = new Map<number, number>();
   if (!closed) live = new Map((await loadBoard(env)).rows.map((r) => [r.id, r.value]));
@@ -817,12 +825,12 @@ export async function weekRecap(env: Env, key: string, now = Date.now()) {
   const table = agentWeeks(agents.results as any[], marks.results as any[], start, endValue, scores).filter((r) => r.change !== 0 || (fills.results as any[]).some((f) => f.name === r.name));
   const traders = new Set((fills.results as any[]).map((f) => f.name)).size;
   const past = (keys.results as any[]).map((r) => r.week).filter((w: string) => w !== key);
-  const prevKey = weekKey(end - 7 * 86_400_000);
+  const prevKey = weekKey(prevClose(end));
   return {
     key, start, end, closed, as_of: et?.recorded_at ?? until,
     moves, agents: table, best, worst, trades: (fills.results as any[]).length, traders,
     tweet: tweetLine(key, closed, moves, best[0] ?? null),
-    prev: closeOf(prevKey)! > seasonStart ? prevKey : null,
+    prev: first ? null : prevKey,
     next: closed ? weekKey(end + 7 * 86_400_000) : null,
     past,
   };

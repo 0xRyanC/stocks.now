@@ -84,7 +84,7 @@ export function accountValue(cash: number, holdings: Holding[], open: OpenOrder[
   return Math.floor(v + 1e-6);
 }
 
-/** Friday score: new highs only. Losing and winning it back scores nothing twice. */
+/** A week's score, recorded at Monday's bell: new highs only. Losing and winning it back scores nothing twice. */
 export function weekScore(value: number, highWaterBefore: number): { score: number; highWaterAfter: number } {
   const score = Math.max(0, value - highWaterBefore);
   return { score, highWaterAfter: Math.max(highWaterBefore, value) };
@@ -237,12 +237,31 @@ export class RuleError extends Error {
 }
 
 /** New York calendar date (YYYY-MM-DD) of a moment. */
-/** Whether the US market is open by the clock: weekdays 9:30 to 16:00 New York time (holidays aren't modeled). */
+/**
+ * US market holidays (NYSE closed all day) and early closes (1 pm New York), for
+ * this season and 2027. Re-check against nyse.com before each new year. A Monday
+ * holiday doesn't move the weekly close: the bell is the league's, not the exchange's.
+ */
+export const US_HOLIDAYS: ReadonlySet<string> = new Set([
+  "2026-11-26", "2026-12-25",
+  "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+]);
+export const US_EARLY_CLOSE: ReadonlySet<string> = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
+
+/** The US market's hours on a New York date, in minutes after midnight, or null if it doesn't open. */
+export function usSession(dateKey: string): { open: number; close: number } | null {
+  const day = new Date(dateKey + "T12:00:00Z").getUTCDay();
+  if (day === 0 || day === 6 || US_HOLIDAYS.has(dateKey)) return null;
+  return { open: 570, close: US_EARLY_CLOSE.has(dateKey) ? 780 : 960 };
+}
+
+/** Whether the US market is open: weekdays 9:30 to 16:00 New York time (13:00 on early-close days), not on holidays. */
 export function usMarketOpen(ms: number): boolean {
+  const s = usSession(nyDate(ms));
+  if (!s) return false;
   const ny = new Date(new Date(ms).toLocaleString("en-US", { timeZone: "America/New_York" }));
-  const day = ny.getDay();
   const mins = ny.getHours() * 60 + ny.getMinutes();
-  return day >= 1 && day <= 5 && mins >= 570 && mins < 960;
+  return mins >= s.open && mins < s.close;
 }
 
 export function nyDate(ms: number): string {

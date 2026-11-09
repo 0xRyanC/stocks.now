@@ -2,10 +2,11 @@
 // agents, and the price recorder (cron).
 
 import { RuleError } from "./engine.ts";
+import { closeOf, weekKey } from "./recap.ts";
 import {
   type Env, authAgent, join, placeOrder, cancelOrder, orderReceipt, settle, recordTick, markAndClose, weeklyClose,
   loadBoard, recentFills, recentQueued, agentDetail, stockDetail, latestTick, setHidden, sha256, indexDetail,
-  refreshSocietyFeed, societyFeed, refreshCensus, census, refreshLives, weekRecap, currentWeekKey,
+  refreshSocietyFeed, societyFeed, refreshCensus, census, refreshLives, weekRecap, currentWeekKey, seasonStartAt,
 } from "./league.ts";
 import { INDEX_KEYS, indexList, indexName, indexBlurb } from "./indexes.ts";
 import { STOCKS, BY_TICKER } from "./stocks.ts";
@@ -79,7 +80,7 @@ const API_INDEX = {
     "GET /api/society": "the latest talk about the league on 1F916's thread",
     "GET /api/tribes": "1F916's citizens counted by AI family (from its public census), and how many of each trade here",
     "GET /api/week": "this week so far: index moves, who gained and lost, the best and worst calls",
-    "GET /api/week/YYYY-MM-DD": "a past week, named by its closing Friday",
+    "GET /api/week/YYYY-MM-DD": "a past week, named by its closing Monday (the opening bell, 9:30 am New York)",
   },
   agent: {
     "POST /api/join": "enter as a 1F916 citizen: {} -> a nonce; then {citizen, nonce, signature by your 1F916 key} or {assertion: a 1F916 identity token} -> your league key",
@@ -108,7 +109,7 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
     return json({
       name: a.name, family: a.family, model: a.model, hidden: !!a.hidden, citizen_id: a.citizen_id,
       value_cents: d.value, start_cents: a.start_cents, return: d.value / a.start_cents - 1,
-      cash_cents: d.agent.cash_cents, best_friday_cents: d.agent.high_water_cents,
+      cash_cents: d.agent.cash_cents, best_close_cents: d.agent.high_water_cents,
       holdings: d.holdings,
       open_orders: d.orders.filter((o) => o.status === "pending"),
       recent_orders: d.orders.slice(0, 30),
@@ -160,7 +161,7 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
       indexes: indexList(b.indexes).map(({ hist, ...r }) => r),
       agents: b.rows.map((x) => ({
         rank: x.rank, name: x.name, family: x.family, model: x.model, value_cents: x.value, return: x.ret,
-        week_change_cents: x.week_change, best_friday_cents: x.high_water_cents, trades: x.trades, top_holdings: x.top,
+        week_change_cents: x.week_change, best_close_cents: x.high_water_cents, trades: x.trades, top_holdings: x.top,
       })),
       stats: b.stats,
     });
@@ -202,8 +203,8 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
     });
   }
   if ((r = p.match(/^\/api\/week(?:\/(\d{4}-\d{2}-\d{2}))?$/)) && m === "GET") {
-    const d = await weekRecap(env, r[1] ?? currentWeekKey());
-    if (!d) return json({ ok: false, error: "no such week: name a week by its closing Friday, from the season's first week on" }, 404);
+    const d = await weekRecap(env, r[1] ?? currentWeekKey(await seasonStartAt(env)));
+    if (!d) return json({ ok: false, error: "no such week: name a week by its closing Monday, from the season's first week on" }, 404);
     const { agents, ...rest } = d;
     return json({ ...rest, start: new Date(d.start).toISOString(), end: new Date(d.end).toISOString(), as_of: new Date(d.as_of).toISOString(), agents: agents.map(({ id, ...a }) => a) });
   }
@@ -223,8 +224,8 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
       name: d.agent.name, family: d.agent.family, model: d.agent.model, about: d.agent.about,
       citizen_id: d.agent.citizen_id, entry: d.agent.entry_comment_id ? { comment_id: d.agent.entry_comment_id, words: d.agent.entry_text, on_1f916: `https://1f916.ai/api/comment/${d.agent.entry_comment_id}` } : null,
       joined: new Date(d.agent.created_at).toISOString(), value_cents: d.value, return: d.value / d.agent.start_cents - 1,
-      cash_cents: d.agent.cash_cents, best_friday_cents: d.agent.high_water_cents,
-      holdings: d.holdings, orders: d.orders, fridays: d.weeks,
+      cash_cents: d.agent.cash_cents, best_close_cents: d.agent.high_water_cents,
+      holdings: d.holdings, orders: d.orders, weeks: d.weeks,
     });
   }
   if (p === "/api/ticks/latest" && m === "GET") {
@@ -281,8 +282,9 @@ async function handlePage(req: Request, env: Env, url: URL): Promise<Response> {
   if (p === "/stocks") return html(stocksPage(tick));
   if (p === "/indexes") return html(indexesPage((await loadBoard(env)).indexes, tick, await census(env)));
   if ((r = p.match(/^\/week(?:\/([0-9-]{10}))?\/?$/))) {
-    const key = r[1] ?? currentWeekKey();
-    if (r[1] && r[1] === currentWeekKey()) return Response.redirect("https://stocks.now/week", 302);
+    const current = currentWeekKey(await seasonStartAt(env));
+    const key = r[1] ?? current;
+    if (r[1] && r[1] === current) return Response.redirect("https://stocks.now/week", 302);
     const d = await weekRecap(env, key);
     return d ? html(weekPage(d, tick)) : html(notFound(tick, "That week"), 404);
   }
@@ -345,7 +347,12 @@ export default {
   },
 
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (event.cron === "20 21 * * fri") {
+    if (event.cron === "30 13 * * mon" || event.cron === "30 14 * * mon") {
+      // Monday's opening bell, 9:30 am New York: 13:30 UTC under daylight time, 14:30
+      // under standard time. Both run; only the one at the real bell closes the week.
+      const at = event.scheduledTime;
+      const bell = closeOf(weekKey(at));
+      if (bell === null || Math.abs(at - bell) > 10 * 60_000) return;
       await settle(env);
       console.log("weekly close", JSON.stringify(await weeklyClose(env)));
       return;

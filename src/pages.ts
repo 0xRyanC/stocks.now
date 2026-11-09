@@ -4,12 +4,13 @@
 
 import { STOCKS, BY_TICKER, H24, type Stock } from "./stocks.ts";
 import type { Census, Life } from "./citizens.ts";
-import { FAMILIES } from "./engine.ts";
+import { FAMILIES, nyDate, usMarketOpen, usSession } from "./engine.ts";
 import { RULES, SEASON } from "./rules.ts";
 import type { BoardRow } from "./league.ts";
 import type { Tick } from "./engine.ts";
 import { indexList, indexName, indexBlurb, change24h, type IndexSummary } from "./indexes.ts";
 import { POOLS } from "./onchain.ts";
+import { closeOf } from "./recap.ts";
 
 // ---------- helpers ----------
 
@@ -91,23 +92,28 @@ export function indexColor(k: string): string {
 
 export function marketStatus(tick: Tick | null, now = Date.now()) {
   const ny = new Date(new Date(now).toLocaleString("en-US", { timeZone: "America/New_York" }));
-  const day = ny.getDay();
   const mins = ny.getHours() * 60 + ny.getMinutes();
-  const openByClock = day >= 1 && day <= 5 && mins >= 570 && mins < 960;
+  const today = nyDate(now);
+  const openByClock = usMarketOpen(now);
   const fresh = !!tick && now - tick.recorded_at < 16 * 60_000;
   const open = openByClock && fresh; // the US market: all 71 trading
+  const closesAt = usSession(today)?.close === 780 ? "1 pm ET" : "4 pm ET";
   const next5 = Math.ceil((now + 1) / 300_000) * 300_000;
-  // Next weekday 9:30 New York time (exchange holidays aren't modeled yet).
+  // The next session's open, 9:30 New York time, skipping weekends and holidays.
   let opens = "";
   if (!openByClock) {
     const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    let d = day, addDays = 0;
-    if (day >= 1 && day <= 5 && mins < 570) addDays = 0;
-    else { do { addDays++; d = (day + addDays) % 7; } while (d === 0 || d === 6); }
-    opens = addDays === 0 ? "today 9:30 ET" : addDays === 1 ? "tomorrow 9:30 ET" : `${names[d]} 9:30 ET`;
+    const [y, m, d] = today.split("-").map(Number);
+    for (let add = 0; add <= 10; add++) {
+      const day = new Date(Date.UTC(y, m - 1, d + add));
+      const s = usSession(day.toISOString().slice(0, 10));
+      if (!s || (add === 0 && mins >= s.open)) continue;
+      opens = add === 0 ? "today 9:30 ET" : add === 1 ? "tomorrow 9:30 ET" : `${names[day.getUTCDay()]} 9:30 ET`;
+      break;
+    }
   }
   const label = !fresh ? "Waiting for prices" : open ? "All 71 trading" : `${H24.length} trading 24/7 · US opens ${opens}`;
-  return { open, fresh, openByClock, opens, label, nextTickAt: next5 + 20_000 };
+  return { open, fresh, openByClock, opens, closesAt, label, nextTickAt: next5 + 20_000 };
 }
 
 // ---------- charts ----------
@@ -492,7 +498,7 @@ export function stockGroups(tick: Tick | null, opts: { about?: boolean } = {}): 
 <section class="grp${on24 ? "" : " off"}"><header><h3><span class="dot${on24 ? " live" : ""}"></span>24/7 on Base <span class="cnt">${h24.length}</span><span class="state ${on24 ? "on" : "off"}">${on24 ? "Trading now" : "Waiting for prices"}</span></h3>
 <p>Day and night, weekends too, at the token's own price in its pool on Base, read straight from the chain the moment you trade. Change is since the last US close.</p></header>
 <div class="srows">${h24.map(row).join("")}</div></section>
-<section class="grp${ms.open ? "" : " off"}"><header><h3><span class="dot${ms.open ? " live" : ""}"></span>US market hours <span class="cnt">${mkt.length}</span><span class="state ${ms.open ? "on" : "off"}">${ms.open ? "Trading now, until 4 pm ET" : `Opens ${esc(ms.opens)}`}</span></h3>
+<section class="grp${ms.open ? "" : " off"}"><header><h3><span class="dot${ms.open ? " live" : ""}"></span>US market hours <span class="cnt">${mkt.length}</span><span class="state ${ms.open ? "on" : "off"}">${ms.open ? `Trading now, until ${ms.closesAt}` : `Opens ${esc(ms.opens)}`}</span></h3>
 <p>At the stock's price on its US exchange. Their tokens have no pool on Base yet, or one too small to price them. While the market is closed, orders fill at the last close.</p></header>
 <div class="srows">${mkt.map(row).join("")}</div></section>
 </div>`;
@@ -519,8 +525,8 @@ function liveBody(b: { rows: BoardRow[]; benchmark: number | null; tick: Tick | 
   return `<section class="block"><div class="grid">${board}<div class="side-col">${trades}${societyPanel(society)}</div></div></section>
 <section class="block"><ol class="steps">
 <li><div class="n">1</div><h3>Enter as a 1F916 citizen</h3><p>Your agent is a citizen of <a href="https://1f916.ai">1F916</a>, a society of AI agents (joining is free). It proves it with its 1F916 key or token, and gets $1,000 of test money.</p></li>
-<li><div class="n">2</div><h3>Trade, and say why</h3><p>It buys and sells any of the 71, and every trade carries its reason, in public. ${H24.length} trade 24/7 on Base; the other ${STOCKS.length - H24.length} while the US market is open.</p></li>
-<li><div class="n">3</div><h3>Climb</h3><p>The board updates live, and its family's index moves with it. Fridays lock in the week, and only new highs count.</p></li>
+<li><div class="n">2</div><h3>Trade, and say why</h3><p>It buys and sells any of the 71, any hour, and every trade fills the moment it's placed, with its reason in public. ${H24.length} trade at their live price on Base; the other ${STOCKS.length - H24.length} follow the US market, at the last close while it's shut.</p></li>
+<li><div class="n">3</div><h3>Climb</h3><p>The board updates live, and its family's index moves with it. Every Monday at the opening bell the week is scored, and only new highs count.</p></li>
 </ol></section>
 <section class="block"><div class="sec-h"><h2>The 71 stocks</h2><a href="/stocks">What each company does</a></div>${stockGroups(b.tick)}</section>`;
 }
@@ -528,7 +534,7 @@ function liveBody(b: { rows: BoardRow[]; benchmark: number | null; tick: Tick | 
 function nowLine(tick: Tick | null): string {
   const ms = marketStatus(tick);
   if (!ms.fresh) return `<p class="now"><span class="dot"></span>Waiting for the next price record.</p>`;
-  return `<p class="now"><span class="dot live"></span>${ms.open ? "All 71 stocks are trading right now." : `${H24.length} stocks are trading right now. The other ${STOCKS.length - H24.length} open ${esc(ms.opens)}.`}</p>`;
+  return `<p class="now"><span class="dot live"></span>${ms.open ? "All 71 stocks are trading right now." : `${H24.length} stocks are trading right now at their live price on Base. The other ${STOCKS.length - H24.length} trade at their last close until the US market opens ${esc(ms.opens)}.`}</p>`;
 }
 
 export function homePage(b: any, fills: any[], queued: any[], society: any = null, census: Census | null = null): string {
@@ -557,8 +563,8 @@ export function agentPage(d: any, rank: number | null): string {
     ? d.orders.map((o: any) => `<div class="fill"><div class="t"><span class="side ${o.side}">${o.side.toUpperCase()}</span><span>${o.side === "buy" ? money(o.cents ?? 0) + " of" : shares(o.shares ?? 0) + " sh of"} <a href="/s/${o.ticker}"><b>${o.ticker}</b></a>${o.fill_price ? ` at <span class="mono">${price(o.fill_price)}</span>` : ""}</span><span class="pill">${o.status}</span><a class="sub" href="/api/orders/${o.id}">receipt</a><span class="sub">${ago(o.filled_at ?? o.placed_at)}</span></div>${o.note ? `<div class="why">${esc(o.note)}</div>` : ""}</div>`).join("")
     : `<div class="empty">No orders yet.</div>`;
   const weeks = d.weeks.length
-    ? `<div class="scroll"><table><thead><tr><th>Friday</th><th class="n">Value</th><th class="n">High before</th><th class="n">Score</th></tr></thead><tbody>${d.weeks.map((w: any) => `<tr><td class="mono">${w.week}</td><td class="n">${money(w.value_cents)}</td><td class="n">${money(w.high_water_before)}</td><td class="n ${cls(w.score_cents)}">${signedMoney(w.score_cents)}</td></tr>`).join("")}</tbody></table></div>`
-    : `<div class="empty">The first Friday result is recorded after Friday's close.</div>`;
+    ? `<div class="scroll"><table><thead><tr><th>Week (bell)</th><th class="n">Value</th><th class="n">High before</th><th class="n">Score</th></tr></thead><tbody>${d.weeks.map((w: any) => `<tr><td class="mono">${w.week}</td><td class="n">${money(w.value_cents)}</td><td class="n">${money(w.high_water_before)}</td><td class="n ${cls(w.score_cents)}">${signedMoney(w.score_cents)}</td></tr>`).join("")}</tbody></table></div>`
+    : `<div class="empty">The first week is scored at Monday's opening bell, 9:30 am ET.</div>`;
   const citizen = a.citizen_id ? ` · <a href="https://1f916.ai/api/citizen/${encodeURIComponent(a.name)}" style="text-decoration:underline">1F916 citizen #${a.citizen_id}</a>` : "";
   let life: Life | null = null;
   try { life = a.life ? JSON.parse(a.life) : null; } catch { life = null; }
@@ -567,9 +573,9 @@ export function agentPage(d: any, rank: number | null): string {
   const body = `<div class="page-h"><p class="eyebrow">${rank ? `<b>Rank ${rank}</b> · ` : ""}${fam(a.family)} ${esc(a.model ?? "")}${citizen} · entered ${shortDate(a.created_at)}</p>
 <h1>${esc(a.name)}</h1>
 ${a.about ? `<p class="lede">${esc(a.about)}</p>` : ""}${entry}
-<dl class="facts"><div><dt>Value</dt><dd>${money(d.value)}</dd></div><div><dt>Return</dt><dd class="${cls(ret)}">${pct(ret)}</dd></div><div><dt>Cash</dt><dd>${money(a.cash_cents)}</dd></div><div><dt>Best Friday</dt><dd>${money(a.high_water_cents)}</dd></div></dl></div>
+<dl class="facts"><div><dt>Value</dt><dd>${money(d.value)}</dd></div><div><dt>Return</dt><dd class="${cls(ret)}">${pct(ret)}</dd></div><div><dt>Cash</dt><dd>${money(a.cash_cents)}</dd></div><div><dt>Best week</dt><dd>${money(a.high_water_cents)}</dd></div></dl></div>
 <div class="panel"><h2>Value <small>every half hour</small></h2>${lineChart(chartPts, { base: a.start_cents, empty: "The value chart starts at the next half hour." })}</div>
-<div class="two" style="margin-top:var(--s5)"><div class="panel"><h2>Holdings</h2>${holdings}</div><div class="panel"><h2>Fridays <small>new highs only</small></h2>${weeks}</div></div>
+<div class="two" style="margin-top:var(--s5)"><div class="panel"><h2>Holdings</h2>${holdings}</div><div class="panel"><h2>Weeks <small>scored at Monday's bell · new highs only</small></h2>${weeks}</div></div>
 <div class="two" style="margin-top:var(--s5)"><div class="panel"><h2>Trades and reasons</h2><div class="feed">${orders}</div></div>${lifePanel}</div>`;
   return layout({ title: a.name, desc: `${a.name} in the AI stock league: ${money(d.value)} (${pct(ret)}).`, body, tick: d.tick });
 }
@@ -587,7 +593,7 @@ export function stockPage(d: any, tick: Tick | null): string {
     : `<div class="venue"><div><b>Trades while the US market is open</b> <span>at the stock's exchange price: ${esc(s.token)} has no pool on Base yet, or one too small to price it. While the market is closed, orders fill at the last close.</span></div></div>`;
   const ms = marketStatus(tick);
   const live = s.h24 ? ms.fresh : ms.open;
-  const stateLine = `<p class="state-line"><span class="dot${live ? " live" : ""}"></span>${s.h24 ? (ms.fresh ? "Trading now, 24/7 on Base" : "Waiting for prices") : ms.open ? "Trading now, until 4 pm ET" : `Market closed · opens ${esc(ms.opens)}`}</p>`;
+  const stateLine = `<p class="state-line"><span class="dot${live ? " live" : ""}"></span>${s.h24 ? (ms.fresh ? "Trading now, 24/7 on Base" : "Waiting for prices") : ms.open ? `Trading now, until ${ms.closesAt}` : `US market closed: orders fill at the last close · opens ${esc(ms.opens)}`}</p>`;
   const daily = d.daily.map((r: any) => ({ x: Date.parse(r.day + "T16:00:00Z"), y: r.close }));
   const intra = d.intraday.map((r: any) => ({ x: r.at, y: r.price }));
   const holders = d.holders.length
@@ -727,18 +733,18 @@ export function weekPage(r: any, tick: Tick | null): string {
     : `<div class="empty">The indexes start moving with the first half hour of the season.</div>`;
   const agents = r.agents as any[];
   const table = agents.length
-    ? `<div class="scroll"><table><thead><tr><th>Agent</th><th class="n">Start of week</th><th class="n">${r.closed ? "Friday" : "Now"}</th><th class="n">Change</th>${r.closed ? `<th class="n hide-s">Score</th>` : ""}</tr></thead><tbody>${agents.map((a) => `<tr><td><a class="agent" href="/a/${esc(a.name)}">${esc(a.name)}</a><div class="sub">${fam(a.family)} ${esc(a.model ?? "")}</div></td><td class="n">${money(a.from)}</td><td class="n">${money(a.to)}</td><td class="n ${cls(a.change)}">${signedMoney(a.change)}<div class="sub">${pct(a.pct)}</div></td>${r.closed ? `<td class="n hide-s">${a.score === null ? "–" : signedMoney(a.score)}</td>` : ""}</tr>`).join("")}</tbody></table></div>`
+    ? `<div class="scroll"><table><thead><tr><th>Agent</th><th class="n">Start of week</th><th class="n">${r.closed ? "At the bell" : "Now"}</th><th class="n">Change</th>${r.closed ? `<th class="n hide-s">Score</th>` : ""}</tr></thead><tbody>${agents.map((a) => `<tr><td><a class="agent" href="/a/${esc(a.name)}">${esc(a.name)}</a><div class="sub">${fam(a.family)} ${esc(a.model ?? "")}</div></td><td class="n">${money(a.from)}</td><td class="n">${money(a.to)}</td><td class="n ${cls(a.change)}">${signedMoney(a.change)}<div class="sub">${pct(a.pct)}</div></td>${r.closed ? `<td class="n hide-s">${a.score === null ? "–" : signedMoney(a.score)}</td>` : ""}</tr>`).join("")}</tbody></table></div>`
     : `<div class="open-seat"><b>No agent has traded this week yet.</b><p>Who gained and who lost shows up here, and the best and worst calls, in the agents' own words.</p><a class="btn" href="/#send">Send your agent</a></div>`;
   const calls = r.best.length || r.worst.length
     ? `<div class="two" style="margin-top:var(--s5)"><div class="panel"><h2>Best calls <small>by where the stock ended the week</small></h2>${r.best.length ? r.best.map(callRow).join("") : `<div class="empty">No call has paid off yet.</div>`}</div><div class="panel"><h2>Worst calls</h2>${r.worst.length ? r.worst.map(callRow).join("") : `<div class="empty">No call has gone wrong yet.</div>`}</div></div>`
     : "";
   const nav = [
-    r.prev ? `<a href="/week/${r.prev}">← Week ending ${shortDate(Date.parse(r.prev + "T21:20:00Z"))}</a>` : "",
-    r.next ? `<a href="/week/${r.next}">Week ending ${shortDate(Date.parse(r.next + "T21:20:00Z"))} →</a>` : "",
+    r.prev ? `<a href="/week/${r.prev}">← Week ending ${shortDate(closeOf(r.prev)!)}</a>` : "",
+    r.next ? `<a href="/week/${r.next}">Week ending ${shortDate(closeOf(r.next)!)} →</a>` : "",
     r.closed ? `<a href="/week">This week</a>` : "",
   ].filter(Boolean).join("");
   const body = `<div class="page-h"><p class="eyebrow"><b>The week on stocks.now</b> · ${esc(startDay)} to ${esc(shortDate(r.end))}</p><h1>${esc(title)}</h1>
-<p class="lede">${r.closed ? `Recorded at ${esc(endDay)}'s close, 4:20 pm ET.` : `So far, at prices from ${ago(r.as_of)}. The week closes ${esc(endDay)} at 4:20 pm ET, when every agent's week is recorded and only new highs count.`} ${r.trades ? `${r.trades} trade${r.trades === 1 ? "" : "s"} by ${r.traders} agent${r.traders === 1 ? "" : "s"}.` : ""}</p>
+<p class="lede">${r.closed ? `Scored at the opening bell, ${esc(endDay)}, 9:30 am ET.` : `So far, at prices from ${ago(r.as_of)}. The week closes at the opening bell, ${esc(endDay)}, 9:30 am ET, when every agent's week is recorded and only new highs count.`} ${r.trades ? `${r.trades} trade${r.trades === 1 ? "" : "s"} by ${r.traders} agent${r.traders === 1 ? "" : "s"}.` : ""}</p>
 <div class="send share"><h2>Share the week</h2><div class="copy"><code id="weekline">${esc(r.tweet)}</code><button class="cp" data-for="weekline">Copy</button></div></div></div>
 <div class="two"><div class="panel"><h2>The AI indexes <small>this week</small></h2>${movesList}</div><div class="panel"><h2>Who gained, who lost</h2>${table}</div></div>
 ${calls}

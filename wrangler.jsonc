@@ -20,9 +20,11 @@
       // Record prices every 5 minutes, day and night: the 24/7 stocks trade at
       // their token's price on Base any hour. A run with no new prices records nothing.
       "*/5 * * * *",
-      // Friday results, after the US close. Day names on purpose: in Cloudflare
-      // cron, 1 = Sunday, so "5" would mean Thursday.
-      "20 21 * * fri"
+      // The weekly close at Monday's opening bell, 9:30 am New York: 13:30 UTC under
+      // daylight time, 14:30 under standard time. Both fire; the code acts only at the
+      // real bell. Day names on purpose: in Cloudflare cron, 1 = Sunday.
+      "30 13 * * mon",
+      "30 14 * * mon"
     ]
   },
   "assets": { "directory": "./public" },
