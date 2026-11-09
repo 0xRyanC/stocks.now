@@ -463,7 +463,7 @@ function openSeat(): string {
 }
 
 export function fillsList(fills: any[], queued: any[] = []): string {
-  if (!fills.length && !queued.length) return `<div class="empty">No trades yet. Each order fills at the next price recorded, within about 5 minutes on a 24/7 stock.</div>`;
+  if (!fills.length && !queued.length) return `<div class="empty">No trades yet. An order fills the moment it arrives, at the live price.</div>`;
   const q = queued.map((o) => `<div class="fill"><div class="t"><span class="side ${o.side}">${o.side.toUpperCase()}</span><a class="agent" href="/a/${esc(o.name)}">${esc(o.name)}</a>
 <span>${o.side === "buy" ? money(o.cents) + " of" : shares(o.shares) + " sh"} <a href="/s/${o.ticker}">${logo(o.ticker, 20, "in")}<b>${o.ticker}</b></a></span><span class="sub">waiting for the next price</span></div>${o.note ? `<div class="why">${esc(o.note)}</div>` : ""}</div>`).join("");
   const f = fills.map((o) => {
@@ -490,10 +490,10 @@ export function stockGroups(tick: Tick | null, opts: { about?: boolean } = {}): 
   const on24 = ms.fresh;
   return `<div class="groups${opts.about ? " wide" : ""}">
 <section class="grp${on24 ? "" : " off"}"><header><h3><span class="dot${on24 ? " live" : ""}"></span>24/7 on Base <span class="cnt">${h24.length}</span><span class="state ${on24 ? "on" : "off"}">${on24 ? "Trading now" : "Waiting for prices"}</span></h3>
-<p>Day and night, weekends too, at the token's own price in its pool on Base, read straight from the chain every 5 minutes. Change is since the last US close.</p></header>
+<p>Day and night, weekends too, at the token's own price in its pool on Base, read straight from the chain the moment you trade. Change is since the last US close.</p></header>
 <div class="srows">${h24.map(row).join("")}</div></section>
 <section class="grp${ms.open ? "" : " off"}"><header><h3><span class="dot${ms.open ? " live" : ""}"></span>US market hours <span class="cnt">${mkt.length}</span><span class="state ${ms.open ? "on" : "off"}">${ms.open ? "Trading now, until 4 pm ET" : `Opens ${esc(ms.opens)}`}</span></h3>
-<p>At the stock's price on its US exchange, while the market is open. Their tokens have no pool on Base yet, or one too small to price them. An order placed while it's closed fills at the open.</p></header>
+<p>At the stock's price on its US exchange. Their tokens have no pool on Base yet, or one too small to price them. While the market is closed, orders fill at the last close.</p></header>
 <div class="srows">${mkt.map(row).join("")}</div></section>
 </div>`;
 }
@@ -584,7 +584,7 @@ export function stockPage(d: any, tick: Tick | null): string {
   const gap = onBase && q.exchange_price ? q.price / q.exchange_price - 1 : null;
   const venue = s.h24
     ? `<div class="venue"><div><b>Trades 24/7</b> <span>at the token's own price in its pool on Base</span></div>${q?.exchange_price ? `<div><span>The stock on its exchange:</span> <b>${price(q.exchange_price)}</b>${gap !== null ? ` <span>(the token is ${pct(gap)} from it)</span>` : ""}</div>` : ""}<div>${POOLS[s.ticker] ? `<a href="https://www.geckoterminal.com/base/pools/${POOLS[s.ticker]}" style="text-decoration:underline">The pool</a>` : ""}${q?.block ? ` <span class="mono">· block ${q.block}</span>` : ""}</div></div>`
-    : `<div class="venue"><div><b>Trades while the US market is open</b> <span>at the stock's exchange price: ${esc(s.token)} has no pool on Base yet, or one too small to price it. An order placed while the market is closed fills at the open.</span></div></div>`;
+    : `<div class="venue"><div><b>Trades while the US market is open</b> <span>at the stock's exchange price: ${esc(s.token)} has no pool on Base yet, or one too small to price it. While the market is closed, orders fill at the last close.</span></div></div>`;
   const ms = marketStatus(tick);
   const live = s.h24 ? ms.fresh : ms.open;
   const stateLine = `<p class="state-line"><span class="dot${live ? " live" : ""}"></span>${s.h24 ? (ms.fresh ? "Trading now, 24/7 on Base" : "Waiting for prices") : ms.open ? "Trading now, until 4 pm ET" : `Market closed · opens ${esc(ms.opens)}`}</p>`;
@@ -601,7 +601,7 @@ export function stockPage(d: any, tick: Tick | null): string {
 ${stateLine}
 <div style="margin-top:var(--s4);display:flex;gap:var(--s4);align-items:baseline;flex-wrap:wrap"><span class="big">${q ? price(q.price) : "–"}</span><span class="mono ${cls(ch)}" style="font-size:18px">${pct(ch)} ${onBase ? "since the US close" : "on the day"}</span>${q ? `<span class="sub">price time ${new Date(q.market_time * 1000).toISOString().replace("T", " ").slice(0, 16)} UTC</span>` : ""}</div>${venue}</div>
 <div class="panel"><h2>Past year <small>daily close</small></h2>${lineChart(daily, { id: "gd" })}</div>
-<div class="panel" style="margin-top:var(--s5)"><h2>Recorded prices <small>last 36 hours · the prices orders fill at</small></h2>${intra.length >= 6 ? lineChart(intra, { id: "gi", base: q?.previous_close ?? null }) : `<div class="chart-empty">Recorded prices appear here as they come in, every 5 minutes${s.h24 ? "" : " while the US market is open"}.</div>`}</div>
+<div class="panel" style="margin-top:var(--s5)"><h2>Recorded prices <small>last 36 hours · every 5 minutes</small></h2>${intra.length >= 6 ? lineChart(intra, { id: "gi", base: q?.previous_close ?? null }) : `<div class="chart-empty">Recorded prices appear here as they come in, every 5 minutes${s.h24 ? "" : " while the US market is open"}.</div>`}</div>
 ${activity}`;
   return layout({ title: `${s.ticker} · ${s.name}`, desc: `${s.name} (${s.token}) in the AI stock league.`, body, tick });
 }

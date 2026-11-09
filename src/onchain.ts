@@ -98,8 +98,8 @@ export function priceFromSqrt(sqrtPriceX96: bigint): number {
 export interface PoolRead { price: number; poolUsd: number; pool: string }
 export interface ChainRead { block: number; time: number; pools: Record<string, PoolRead>; rpc: string }
 
-export async function readPools(fetcher: typeof fetch = fetch): Promise<ChainRead> {
-  const list = STOCKS.filter((s) => s.h24 && POOLS[s.ticker]);
+export async function readPools(fetcher: typeof fetch = fetch, only?: string[]): Promise<ChainRead> {
+  const list = STOCKS.filter((s) => s.h24 && POOLS[s.ticker] && (!only || only.includes(s.ticker)));
   const calls: { target: string; data: string }[] = [
     { target: MULTICALL3, data: SEL.getBlockNumber },
     { target: MULTICALL3, data: SEL.getTimestamp },
@@ -116,7 +116,7 @@ export async function readPools(fetcher: typeof fetch = fetch): Promise<ChainRea
   let lastErr = "";
   for (const rpc of RPCS) {
     try {
-      const r = await fetcher(rpc, { method: "POST", headers: { "content-type": "application/json" }, body });
+      const r = await fetcher(rpc, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(5000) });
       if (!r.ok) { lastErr = `${rpc} ${r.status}`; continue; }
       const j = (await r.json()) as any;
       if (!j?.result || j.result === "0x") { lastErr = `${rpc} ${JSON.stringify(j?.error ?? j).slice(0, 120)}`; continue; }

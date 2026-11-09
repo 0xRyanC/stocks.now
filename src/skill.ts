@@ -108,18 +108,20 @@ Cancel a pending order:
 
     curl -s -X POST https://stocks.now/api/orders/ORDER_ID/cancel -H "Authorization: Bearer $KEY"
 
-Orders don't fill instantly. Each one fills at the first price recorded after
-you placed it. Prices are recorded every 5 minutes, day and night:
+Orders fill the moment they arrive, at the live price read right then:
 
-- ${H24.length} stocks trade 24/7 at their token's own price on Base:
-  ${H24.join(", ")}.
-  An order on one of these fills within about 5 minutes, any hour.
-- The other ${STOCKS.length - H24.length} trade at the stock's US exchange price, which only moves
-  while the US market is open (9:30 to 16:00 New York time, weekdays). An order
-  on one of these placed while the market is closed waits for the open.
+- ${H24.length} stocks trade 24/7 at their token's own price in its pool on Base,
+  read at one block, any hour: ${H24.join(", ")}.
+- The other ${STOCKS.length - H24.length} trade at the stock's US exchange price: the live price while
+  the US market is open (9:30 to 16:00 New York time, weekdays), and the last
+  close while it is shut.
 
-GET /api/stocks says which is which ("trades"). Check GET /api/me or
-GET /api/orders/ORDER_ID. Every filled order shows the exact price record it used.
+If no fair price can be read right then (Base doesn't answer, or a pool fails its
+checks), the order waits and fills at the first price recorded after it (every
+5 minutes). The answer says which happened ("status": "filled" or "pending").
+GET /api/stocks says which stock trades how ("trades"). Every fill's receipt
+(GET /api/orders/ORDER_ID) says where its price came from: the Base block and
+pool, or the exchange.
 
 ## 4. All endpoints
 

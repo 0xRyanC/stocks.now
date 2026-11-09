@@ -4,12 +4,12 @@
 import {
   START_CENTS, MIN_ORDER_CENTS, MAX_PENDING, MAX_ORDERS_PER_DAY,
   RuleError, checkText, checkReason, firstEligible, sharesFor, proceedsFor,
-  floorShares, accountValue, weekScore, nyDate, checkHandle, familyOf, nonceProblem, tokenProblem, joinMessage,
+  floorShares, accountValue, weekScore, nyDate, usMarketOpen, checkHandle, familyOf, nonceProblem, tokenProblem, joinMessage,
   SOCIETY, LEAGUE_POST, NONCE_RE,
   type TickData, type Tick, type Holding, type OpenOrder,
 } from "./engine.ts";
 import { BY_TICKER, STOCKS } from "./stocks.ts";
-import { fetchExchange, fetchBase, buildTick, hasNewPrices, SOURCE } from "./prices.ts";
+import { fetchExchange, fetchBase, buildTick, hasNewPrices, instantQuote, SOURCE, type LiveQuote } from "./prices.ts";
 import { nextIndexes, type IndexSummary } from "./indexes.ts";
 import { POOLS } from "./onchain.ts";
 import { tallyCensus, lifeOf, type Census } from "./citizens.ts";
@@ -241,8 +241,8 @@ export async function refreshSocietyFeed(env: Env, fetcher: typeof fetch = fetch
   const comments = (d.comments ?? [])
     .filter((c: any) => !c.mod_state)
     .sort((a: any, b: any) => b.created_at - a.created_at)
-    .slice(0, 8)
-    .map((c: any) => ({ id: c.id, author: c.author, model: c.author_model ?? null, family: familyOf(c.author_model), at: c.created_at, text: String(c.body ?? "").replace(/\s+/g, " ").trim().slice(0, 320) }));
+    .slice(0, 200) // every comment, newest first (the home page scrolls through them)
+    .map((c: any) => ({ id: c.id, author: c.author, model: c.author_model ?? null, family: familyOf(c.author_model), at: c.created_at, text: String(c.body ?? "").replace(/\s+/g, " ").trim().slice(0, 600) }));
   const feed = { at: Date.now(), post: LEAGUE_POST, title: d.post?.title ?? null, total: d.comments_total ?? comments.length, authors: d.comments_distinct_authors ?? null, comments };
   await env.DB.prepare("INSERT INTO meta (k, v) VALUES ('society_feed', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(feed)).run();
   return { ok: true, comments: comments.length };
@@ -321,7 +321,24 @@ function centsFrom(body: any): number {
   throw new RuleError('a buy needs "cents" (or "dollars"): how much to spend');
 }
 
-export async function placeOrder(env: Env, agent: AgentRow, body: any) {
+/** Read the price an order on `ticker` fills at right now (see instantQuote), or null to wait. */
+async function liveQuote(env: Env, ticker: string, fetcher: typeof fetch, now: number): Promise<LiveQuote | null> {
+  const s = BY_TICKER[ticker];
+  const last = await latestTick(env);
+  const lastQ = last?.data[ticker] ?? null;
+  try {
+    if (s.h24) {
+      const base = await fetchBase(fetcher, [ticker]);
+      return instantQuote(true, ticker, base, null, lastQ, now, usMarketOpen(now));
+    }
+    const x = (await fetchExchange(fetcher, [ticker]))[ticker] ?? null;
+    return instantQuote(false, ticker, null, x, lastQ, now, usMarketOpen(now));
+  } catch {
+    return null;
+  }
+}
+
+export async function placeOrder(env: Env, agent: AgentRow, body: any, fetcher: typeof fetch = fetch) {
   const ticker = String(body?.ticker ?? body?.symbol ?? "").trim().toUpperCase().replace(/C$/, (m) => (BY_TICKER[String(body?.ticker ?? body?.symbol ?? "").trim().toUpperCase()] ? m : ""));
   if (!BY_TICKER[ticker]) throw new RuleError(`unknown ticker "${body?.ticker ?? ""}". GET /api/stocks lists the 71`);
   const side = String(body?.side ?? "").toLowerCase();
@@ -338,6 +355,29 @@ export async function placeOrder(env: Env, agent: AgentRow, body: any) {
   if (side === "buy") {
     const cents = centsFrom(body);
     if (cents < MIN_ORDER_CENTS) throw new RuleError(`the smallest buy is ${MIN_ORDER_CENTS} cents`);
+    const live = await liveQuote(env, ticker, fetcher, now);
+    const got = live ? sharesFor(cents, live.price) : 0;
+    if (live && got > 0) {
+      // Filled now: cash out, the filled order in, the shares in. Each step runs only if the one before it did.
+      const res = await env.DB.batch([
+        env.DB.prepare("UPDATE agents SET cash_cents = cash_cents - ?1, last_active_at = ?2 WHERE id = ?3 AND cash_cents >= ?1").bind(cents, now, agent.id),
+        env.DB.prepare(
+          `INSERT INTO orders (agent_id, ticker, side, cents, shares, note, status, placed_at, fill_price, price_time, filled_at, fill_venue, fill_block, fill_how)
+           SELECT ?, ?, 'buy', ?, ?, ?, 'filled', ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1 RETURNING id`,
+        ).bind(agent.id, ticker, cents, got, note, now, live.price, live.time, now, live.venue, live.block, live.how),
+        env.DB.prepare(
+          `INSERT INTO positions (agent_id, ticker, shares, cost_cents) SELECT ?, ?, ?, ? WHERE changes() = 1
+           ON CONFLICT (agent_id, ticker) DO UPDATE SET shares = shares + excluded.shares, cost_cents = cost_cents + excluded.cost_cents`,
+        ).bind(agent.id, ticker, got, cents),
+      ]);
+      const id = (res[1].results?.[0] as any)?.id;
+      if (!id) {
+        const cash = await env.DB.prepare("SELECT cash_cents FROM agents WHERE id = ?").bind(agent.id).first<number>("cash_cents");
+        throw new RuleError(`not enough free cash: you have ${cash} cents free (pending buys are set aside)`);
+      }
+      return { ok: true, order: await orderReceipt(env, id) };
+    }
+    // No fair price right now: the order waits for the next price record.
     const res = await env.DB.batch([
       env.DB.prepare("UPDATE agents SET cash_cents = cash_cents - ?1, last_active_at = ?2 WHERE id = ?3 AND cash_cents >= ?1").bind(cents, now, agent.id),
       env.DB.prepare("INSERT INTO orders (agent_id, ticker, side, cents, note, status, placed_at) SELECT ?, ?, 'buy', ?, ?, 'pending', ? WHERE changes() = 1 RETURNING id").bind(agent.id, ticker, cents, note, now),
@@ -361,6 +401,24 @@ export async function placeOrder(env: Env, agent: AgentRow, body: any) {
     if (pos.shares - q < 1e-8) q = pos.shares;
   }
   const cost = pos.cost_cents * (q / pos.shares);
+  const live = await liveQuote(env, ticker, fetcher, now);
+  if (live) {
+    // Filled now: the shares out, the filled order in, the cash in. Each step runs only if the one before it did.
+    const proceeds = proceedsFor(q, live.price);
+    const res = await env.DB.batch([
+      env.DB.prepare("UPDATE positions SET shares = CASE WHEN shares - ?1 < 1e-9 THEN 0 ELSE shares - ?1 END, cost_cents = CASE WHEN shares - ?1 < 1e-9 THEN 0 ELSE cost_cents - ?2 END WHERE agent_id = ?3 AND ticker = ?4 AND shares >= ?1 - 1e-9").bind(q, cost, agent.id, ticker),
+      env.DB.prepare(
+        `INSERT INTO orders (agent_id, ticker, side, cents, shares, cost_cents, note, status, placed_at, fill_price, price_time, filled_at, fill_venue, fill_block, fill_how)
+         SELECT ?, ?, 'sell', ?, ?, ?, ?, 'filled', ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1 RETURNING id`,
+      ).bind(agent.id, ticker, proceeds, q, cost, note, now, live.price, live.time, now, live.venue, live.block, live.how),
+      env.DB.prepare("UPDATE agents SET cash_cents = cash_cents + ?, last_active_at = ? WHERE id = ? AND changes() = 1").bind(proceeds, now, agent.id),
+      env.DB.prepare("DELETE FROM positions WHERE agent_id = ? AND ticker = ? AND shares < 1e-9").bind(agent.id, ticker),
+    ]);
+    const id = (res[1].results?.[0] as any)?.id;
+    if (!id) throw new RuleError("your shares changed while placing this order; check GET /api/me and try again", 409);
+    return { ok: true, order: await orderReceipt(env, id) };
+  }
+  // No fair price right now: the order waits for the next price record.
   const res = await env.DB.batch([
     env.DB.prepare("UPDATE positions SET shares = CASE WHEN shares - ?1 < 1e-9 THEN 0 ELSE shares - ?1 END, cost_cents = CASE WHEN shares - ?1 < 1e-9 THEN 0 ELSE cost_cents - ?2 END WHERE agent_id = ?3 AND ticker = ?4 AND shares >= ?1 - 1e-9").bind(q, cost, agent.id, ticker),
     env.DB.prepare("INSERT INTO orders (agent_id, ticker, side, shares, cost_cents, note, status, placed_at) SELECT ?, ?, 'sell', ?, ?, ?, 'pending', ? WHERE changes() = 1 RETURNING id").bind(agent.id, ticker, q, cost, note, now),
@@ -388,7 +446,7 @@ export async function cancelOrder(env: Env, agent: AgentRow, id: number) {
 
 export async function orderReceipt(env: Env, id: number) {
   const o = await env.DB.prepare(
-    "SELECT o.id, COALESCE(a.display_name, a.name) AS agent, o.ticker, o.side, o.cents, o.shares, o.note, o.status, o.placed_at, o.tick_id, o.fill_price, o.price_time, o.filled_at, o.cancelled_at, t.source AS tick_source, t.recorded_at AS tick_recorded_at, json_extract(t.data, '$.' || o.ticker || '[3]') AS venue, json_extract(t.data, '$.' || o.ticker || '[5]') AS block FROM orders o JOIN agents a ON a.id = o.agent_id LEFT JOIN ticks t ON t.id = o.tick_id WHERE o.id = ?",
+    "SELECT o.id, COALESCE(a.display_name, a.name) AS agent, o.ticker, o.side, o.cents, o.shares, o.note, o.status, o.placed_at, o.tick_id, o.fill_price, o.price_time, o.filled_at, o.cancelled_at, o.fill_how, t.source AS tick_source, t.recorded_at AS tick_recorded_at, COALESCE(o.fill_venue, json_extract(t.data, '$.' || o.ticker || '[3]')) AS venue, COALESCE(o.fill_block, json_extract(t.data, '$.' || o.ticker || '[5]')) AS block FROM orders o JOIN agents a ON a.id = o.agent_id LEFT JOIN ticks t ON t.id = o.tick_id WHERE o.id = ?",
   ).bind(id).first<any>();
   if (!o) return null;
   const r: any = {
@@ -397,13 +455,18 @@ export async function orderReceipt(env: Env, id: number) {
   };
   if (o.side === "buy") r.spend_cents = o.cents; else r.sell_shares = o.shares;
   if (o.status === "filled") {
+    const instant = !o.tick_id;
     r.fill = {
       price: o.fill_price,
       price_time: new Date(o.price_time * 1000).toISOString(),
-      price_record: o.tick_id,
-      price_record_url: `https://stocks.now/api/ticks/${o.tick_id}`,
-      price_recorded_at: o.tick_recorded_at ? new Date(o.tick_recorded_at).toISOString() : null,
-      source: o.tick_source ?? SOURCE,
+      ...(instant
+        ? { when: "the moment the order arrived" }
+        : {
+          price_record: o.tick_id,
+          price_record_url: `https://stocks.now/api/ticks/${o.tick_id}`,
+          price_recorded_at: o.tick_recorded_at ? new Date(o.tick_recorded_at).toISOString() : null,
+        }),
+      source: instant ? (o.venue === "b" ? "the token's pool on Base, read through Multicall3" : "Yahoo Finance regularMarketPrice") : (o.tick_source ?? SOURCE),
       venue: o.venue === "b" ? "the token's pool on Base" : "the US exchange",
       ...(o.venue === "b" && o.block && POOLS[o.ticker] ? {
         base_block: o.block,
@@ -412,7 +475,13 @@ export async function orderReceipt(env: Env, id: number) {
       } : {}),
       applied_at: new Date(o.filled_at).toISOString(),
       ...(o.side === "buy" ? { shares_received: o.shares } : { cents_received: o.cents }),
-      rule: "first price recorded after the order was placed, whose own price time is also after the order",
+      rule: !instant
+        ? "first price recorded after the order was placed, whose own price time is also after the order"
+        : o.fill_how === "close"
+          ? "filled the moment it arrived; the US market was closed, so at the stock's last close"
+          : o.venue === "b"
+            ? "filled the moment it arrived, at the token's live price in its pool on Base"
+            : "filled the moment it arrived, at the stock's live exchange price",
     };
   }
   if (o.status === "cancelled") r.cancelled_at = new Date(o.cancelled_at).toISOString();

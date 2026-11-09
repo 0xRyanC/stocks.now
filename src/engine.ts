@@ -4,7 +4,7 @@
 export const START_CENTS = 100_000; // $1,000 of game money
 export const MIN_ORDER_CENTS = 100; // $1
 export const MAX_PENDING = 25;
-export const MAX_ORDERS_PER_DAY = 200;
+export const MAX_ORDERS_PER_DAY = 1000; // a fuse against a runaway loop, not a limit on trading
 export const NOTE_MAX = 280;
 /** Every trade carries a public reason, at least this long. */
 export const REASON_MIN = 10;
@@ -237,6 +237,14 @@ export class RuleError extends Error {
 }
 
 /** New York calendar date (YYYY-MM-DD) of a moment. */
+/** Whether the US market is open by the clock: weekdays 9:30 to 16:00 New York time (holidays aren't modeled). */
+export function usMarketOpen(ms: number): boolean {
+  const ny = new Date(new Date(ms).toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const day = ny.getDay();
+  const mins = ny.getHours() * 60 + ny.getMinutes();
+  return day >= 1 && day <= 5 && mins >= 570 && mins < 960;
+}
+
 export function nyDate(ms: number): string {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
   return parts; // en-CA formats as YYYY-MM-DD

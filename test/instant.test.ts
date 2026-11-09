@@ -1,0 +1,84 @@
+// Instant fills: the price an order fills at the moment it arrives. Each test
+// names the mutation that should turn it red.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { instantQuote, MIN_POOL_USD, type ExchangeQuote } from "../src/prices.ts";
+import { usMarketOpen, type Quote } from "../src/engine.ts";
+import type { ChainRead } from "../src/onchain.ts";
+
+const SUN = Date.UTC(2026, 10, 8, 23, 0, 0); // Sunday 6 pm New York
+const SUN_S = SUN / 1000;
+const FRI_CLOSE = Date.UTC(2026, 10, 6, 21, 0, 0) / 1000; // Friday 4 pm New York
+const TUE_11 = Date.UTC(2026, 10, 10, 16, 0, 0); // Tuesday 11 am New York
+const TUE_11_S = TUE_11 / 1000;
+
+const chain = (ticker: string, price: number, poolUsd = 500_000): ChainRead => ({
+  block: 4242, time: SUN_S - 2, rpc: "test", pools: { [ticker]: { price, poolUsd, pool: "0xpool" } },
+});
+// An exchange answer whose session ended Friday (off hours) or runs now (in session).
+const closed = (price: number): ExchangeQuote => ({ price, t: FRI_CLOSE, prev: price, sessionStart: FRI_CLOSE - 23400, sessionEnd: FRI_CLOSE });
+const inSession = (price: number): ExchangeQuote => ({ price, t: TUE_11_S - 30, prev: price, sessionStart: TUE_11_S - 5400, sessionEnd: TUE_11_S + 18000 });
+// A last price record's quote for a 24/7 stock: [price, time, prev close, "b", exchange price, block].
+const lastB = (price: number, exchange: number): Quote => [price, SUN_S - 300, exchange, "b", exchange, 4100];
+const lastX = (price: number): Quote => [price, FRI_CLOSE, price, "x"];
+
+test("a 24/7 order fills now at the pool's live price, stamped with its block", () => {
+  // Kill: make instantQuote return null for 24/7 stocks, or price them from the last record.
+  const q = instantQuote(true, "AAPL", chain("AAPL", 270.123456789), null, lastB(268, 269), SUN, false);
+  assert.deepEqual(q, { price: 270.123457, time: SUN_S - 2, venue: "b", block: 4242, how: "pool" });
+});
+
+test("a thin pool can't fill an order; it waits", () => {
+  // Kill: drop the MIN_POOL_USD check from instantQuote.
+  assert.equal(instantQuote(true, "NIO", chain("NIO", 6.1, MIN_POOL_USD - 1), null, lastB(6, 6), SUN, false), null);
+  assert.notEqual(instantQuote(true, "NIO", chain("NIO", 6.1, MIN_POOL_USD), null, lastB(6, 6), SUN, false), null);
+});
+
+test("a pool price more than 15% from the stock can't fill an order; it waits", () => {
+  // Kill: drop the MAX_GAP check from instantQuote.
+  assert.equal(instantQuote(true, "PM", chain("PM", 860), null, lastB(198, 198), SUN, false), null);
+  assert.notEqual(instantQuote(true, "PM", chain("PM", 199), null, lastB(198, 198), SUN, false), null);
+});
+
+test("no Base read, or no exchange price to check it against, means wait", () => {
+  // Kill: fill a 24/7 order without a reference price, or without a chain read.
+  assert.equal(instantQuote(true, "AAPL", null, null, lastB(268, 269), SUN, false), null);
+  assert.equal(instantQuote(true, "AAPL", chain("AAPL", 270), null, null, SUN, false), null);
+});
+
+test("a market-hours stock fills at its live exchange price in session", () => {
+  // Kill: label an in-session fill as the close, or price market-hours stocks from Base.
+  const q = instantQuote(false, "PFE", chain("PFE", 99), inSession(25.5), lastX(25), TUE_11, true);
+  assert.deepEqual(q, { price: 25.5, time: TUE_11_S - 30, venue: "x", block: null, how: "exchange" });
+});
+
+test("while the market is shut, a market-hours stock fills now at its last close", () => {
+  // Kill: make off-hours market-hours orders wait (return null when the session is over).
+  const q = instantQuote(false, "RDDT", null, closed(201.4), lastX(201.4), SUN, false);
+  assert.deepEqual(q, { price: 201.4, time: FRI_CLOSE, venue: "x", block: null, how: "close" });
+});
+
+test("market shut and the exchange silent: the last recorded close still fills it", () => {
+  // Kill: drop the last-record fallback for a shut market.
+  const q = instantQuote(false, "RDDT", null, null, lastX(201.4), SUN, false);
+  assert.deepEqual(q, { price: 201.4, time: FRI_CLOSE, venue: "x", block: null, how: "close" });
+});
+
+test("market open and the exchange silent: the order waits rather than fill at an old price", () => {
+  // Kill: drop the !marketOpen condition on the last-record fallback.
+  assert.equal(instantQuote(false, "RDDT", null, null, lastX(201.4), TUE_11, true), null);
+});
+
+test("the US market clock: weekdays 9:30 to 4 pm New York, in winter and summer time", () => {
+  // Kill: change 570 or 960, or the weekday range, in usMarketOpen.
+  assert.equal(usMarketOpen(TUE_11), true);
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 10, 14, 29)), false); // Tue 9:29 EST
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 10, 14, 30)), true); // Tue 9:30 EST
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 10, 20, 59)), true); // Tue 3:59 pm
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 10, 21, 0)), false); // Tue 4:00 pm
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 14, 16, 0)), false); // Saturday
+  assert.equal(usMarketOpen(SUN), false); // Sunday evening
+  assert.equal(usMarketOpen(Date.UTC(2026, 10, 8, 16, 0)), false); // Sunday 11 am: inside the hours, outside the week
+  assert.equal(usMarketOpen(Date.UTC(2026, 6, 14, 13, 30)), true); // a July Tuesday, 9:30 EDT
+});

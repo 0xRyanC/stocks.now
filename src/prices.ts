@@ -27,15 +27,15 @@ export const MAX_GAP = 0.15;
 export interface ExchangeQuote { price: number; t: number; prev: number | null; sessionStart: number | null; sessionEnd: number | null }
 
 /** Yahoo Finance: regular-market price of every stock, 20 per request. */
-export async function fetchExchange(fetcher: typeof fetch = fetch): Promise<Record<string, ExchangeQuote>> {
-  const tickers = STOCKS.map((s) => s.ticker);
+export async function fetchExchange(fetcher: typeof fetch = fetch, only?: string[]): Promise<Record<string, ExchangeQuote>> {
+  const tickers = only ?? STOCKS.map((s) => s.ticker);
   const chunks: string[][] = [];
   for (let i = 0; i < tickers.length; i += 20) chunks.push(tickers.slice(i, i + 20));
   const out: Record<string, ExchangeQuote> = {};
   await Promise.all(chunks.map(async (chunk) => {
     try {
       const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${chunk.join(",")}&range=1d&interval=1d`;
-      const r = await fetcher(url, { headers: { "user-agent": UA, accept: "application/json" } });
+      const r = await fetcher(url, { headers: { "user-agent": UA, accept: "application/json" }, signal: AbortSignal.timeout(5000) });
       if (!r.ok) return;
       const j = (await r.json()) as any;
       for (const res of j?.spark?.result ?? []) {
@@ -53,10 +53,10 @@ export async function fetchExchange(fetcher: typeof fetch = fetch): Promise<Reco
   return out;
 }
 
-/** Pool prices on Base for the 24/7 stocks, or null if no RPC answered (they keep their last price). */
-export async function fetchBase(fetcher: typeof fetch = fetch): Promise<ChainRead | null> {
+/** Pool prices on Base for the 24/7 stocks (or just `only`), or null if no RPC answered (they keep their last price). */
+export async function fetchBase(fetcher: typeof fetch = fetch, only?: string[]): Promise<ChainRead | null> {
   try {
-    return await readPools(fetcher);
+    return await readPools(fetcher, only);
   } catch {
     return null;
   }
@@ -115,4 +115,47 @@ export function hasNewPrices(next: TickData, last: TickData | null): boolean {
     if (!p || q[1] > p[1]) return true;
   }
   return false;
+}
+
+/** The price an order fills at the moment it arrives, and where it came from. */
+export interface LiveQuote {
+  price: number;
+  time: number; // the price's own time, seconds
+  venue: "b" | "x";
+  block: number | null;
+  how: "pool" | "exchange" | "close"; // Base pool now / the exchange in session / the last close
+}
+
+/**
+ * Instant fills. Pure, so it can be tested. An order fills when it arrives, at:
+ * - a 24/7 stock: its token's price in its pool on Base, read just now, if the pool
+ *   passes the same checks as a price record (MIN_POOL_USD, within MAX_GAP of the
+ *   stock's exchange price);
+ * - a market-hours stock: its exchange price read just now, which is the live price
+ *   in session and the last close after it; if the exchange didn't answer, the last
+ *   recorded price, but only while the market is shut (then it is the close).
+ * null means there is no fair price right now: the order waits for the next price record.
+ */
+export function instantQuote(
+  h24: boolean,
+  ticker: string,
+  base: ChainRead | null,
+  x: ExchangeQuote | null,
+  last: Quote | null,
+  nowMs: number,
+  marketOpen: boolean,
+): LiveQuote | null {
+  if (h24) {
+    const b = base?.pools[ticker];
+    const ref = x?.price ?? last?.[4] ?? null;
+    if (!base || !b || !(b.price > 0) || b.poolUsd < MIN_POOL_USD || !ref || Math.abs(b.price / ref - 1) > MAX_GAP) return null;
+    return { price: round6(b.price), time: base.time, venue: "b", block: base.block, how: "pool" };
+  }
+  const nowSec = Math.floor(nowMs / 1000);
+  if (x && x.price > 0) {
+    const live = x.sessionStart !== null && x.sessionEnd !== null && nowSec >= x.sessionStart && nowSec < x.sessionEnd;
+    return { price: x.price, time: x.t, venue: "x", block: null, how: live ? "exchange" : "close" };
+  }
+  if (!marketOpen && last && last[0] > 0) return { price: last[0], time: last[1], venue: "x", block: null, how: "close" };
+  return null;
 }
