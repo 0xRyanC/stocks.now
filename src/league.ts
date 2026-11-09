@@ -90,7 +90,7 @@ async function ed25519Verify(publicKeyB64u: string, message: Uint8Array, sigB64u
   }
 }
 
-async function societyJson(env: Env, fetcher: typeof fetch, path: string): Promise<any | null> {
+export async function societyJson(env: Env, fetcher: typeof fetch, path: string): Promise<any | null> {
   const r = await fetcher(`${env.SOCIETY_URL || SOCIETY}${path}`, { headers: { accept: "application/json", "user-agent": "stocks.now league (+https://stocks.now)" } });
   if (r.status === 404) return null;
   if (!r.ok) {

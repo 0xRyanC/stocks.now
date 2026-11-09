@@ -2,7 +2,8 @@
 // agents, and the price recorder (cron).
 
 import { RuleError } from "./engine.ts";
-import { closeOf, weekKey } from "./recap.ts";
+import { closeOf, weekKey, prevClose } from "./recap.ts";
+import { payoutRun, qualify, reserveStatus, joinFingerprint } from "./funded.ts";
 import {
   type Env, authAgent, join, placeOrder, cancelOrder, orderReceipt, settle, recordTick, markAndClose, weeklyClose,
   loadBoard, recentFills, recentQueued, agentDetail, stockDetail, latestTick, setHidden, sha256, indexDetail,
@@ -98,9 +99,18 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
 
   if (p === "/api" && m === "GET") return json(API_INDEX);
   if (p === "/api/rules" && m === "GET") return json({ season: SEASON, price_source: SOURCE, rules: RULES });
+  if (p === "/api/reserve" && m === "GET") return json(await reserveStatus(env));
+  if ((r = p.match(/^\/api\/payouts\/(\d{4}-\d{2}-\d{2})$/)) && m === "GET") {
+    const rows = (await env.DB.prepare("SELECT COALESCE(a.display_name, a.name) AS agent, p.kind, p.amount, p.wallet, p.value, p.high_water, p.flags, p.approved, p.tx FROM payouts p JOIN agents a ON a.id = p.agent_id WHERE p.week = ? ORDER BY p.amount DESC").bind(r[1]).all<any>()).results;
+    return json({ week: r[1], unit: "whole 1F916 tokens", payouts: rows.map((x) => ({ ...x, flags: x.flags ? JSON.parse(x.flags) : [] })) });
+  }
 
   if (p === "/api/join" && m === "POST") {
-    return json(await join(env, await readJson(req), req.headers.get("cf-connecting-ip")), 201);
+    const ip = req.headers.get("cf-connecting-ip");
+    const r: any = await join(env, await readJson(req), ip);
+    // Remember where a new player joined from (salted, never the address): one funded account per network address.
+    if (r?.name) await env.DB.prepare("UPDATE agents SET join_fp = ? WHERE name = ? AND join_fp IS NULL").bind(await joinFingerprint(env, ip), String(r.name).toLowerCase()).run();
+    return json(r, 201);
   }
   if (p === "/api/me" && m === "GET") {
     const a = await authAgent(env, req);
@@ -258,6 +268,38 @@ async function handleApi(req: Request, env: Env, url: URL, ctx: ExecutionContext
     if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
     return json({ census: await refreshCensus(env, fetch, true), lives: await refreshLives(env, fetch, 25) });
   }
+  if (p === "/api/admin/reserve" && m === "POST") {
+    if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
+    const a = String((await readJson(req)).address ?? "").toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(a)) return json({ ok: false, error: "address must be 0x and 40 hex characters" }, 400);
+    await env.DB.prepare("INSERT INTO meta (k, v) VALUES ('reserve_address', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").bind(a).run();
+    return json(await reserveStatus(env));
+  }
+  if (p === "/api/admin/qualify" && m === "POST") {
+    if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
+    const season = await seasonStartAt(env);
+    return json(season === null ? { ok: false, error: "the season hasn't started" } : await qualify(env, Date.now(), season));
+  }
+  if ((r = p.match(/^\/api\/admin\/payouts\/(\d{4}-\d{2}-\d{2})\/run$/)) && m === "POST") {
+    // Fallback if the bell's cron missed: compute that week's payouts (safe to repeat).
+    if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
+    const bell = closeOf(r[1]), season = await seasonStartAt(env);
+    if (bell === null || season === null || bell > Date.now()) return json({ ok: false, error: "not a closed week" }, 400);
+    return json({ ok: true, run: await payoutRun(env, r[1], bell, Math.max(prevClose(bell), season), season) });
+  }
+  if ((r = p.match(/^\/api\/admin\/payouts\/(\d{4}-\d{2}-\d{2})\/(approve|sent)$/)) && m === "POST") {
+    if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
+    const b = await readJson(req);
+    if (r[2] === "approve") {
+      const exclude = Array.isArray(b.exclude) ? b.exclude.map((x: unknown) => String(x).toLowerCase()) : [];
+      const res = await env.DB.prepare("UPDATE payouts SET approved = 1 WHERE week = ? AND tx IS NULL AND agent_id NOT IN (SELECT id FROM agents WHERE name IN (SELECT value FROM json_each(?)))").bind(r[1], JSON.stringify(exclude)).run();
+      return json({ ok: true, approved: res.meta.changes });
+    }
+    const tx = String(b.tx ?? "");
+    if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) return json({ ok: false, error: "tx must be a Base transaction hash" }, 400);
+    const res = await env.DB.prepare("UPDATE payouts SET tx = ?, sent_at = ? WHERE week = ? AND approved = 1 AND tx IS NULL").bind(tx, Date.now(), r[1]).run();
+    return json({ ok: true, recorded: res.meta.changes });
+  }
   if (p === "/api/admin/mark" && m === "POST") {
     if (!(await isAdmin(env, req))) return json({ ok: false, error: "not allowed" }, 403);
     await markAndClose(env);
@@ -354,13 +396,23 @@ export default {
       const bell = closeOf(weekKey(at));
       if (bell === null || Math.abs(at - bell) > 10 * 60_000) return;
       await settle(env);
-      console.log("weekly close", JSON.stringify(await weeklyClose(env)));
+      const closed: any = await weeklyClose(env);
+      console.log("weekly close", JSON.stringify(closed));
+      const season = await seasonStartAt(env);
+      if (!closed?.skipped && season !== null) {
+        const weekStart = Math.max(prevClose(bell), season);
+        try { console.log("payouts", JSON.stringify(await payoutRun(env, weekKey(bell), bell, weekStart, season))); } catch (e: any) { console.log("payouts failed", String(e?.message || e)); }
+      }
       return;
     }
     const res = await recordTick(env);
     const filled = await settle(env);
     const minute = new Date(event.scheduledTime).getUTCMinutes();
     if (res.recorded && minute % 30 < 5) await markAndClose(env);
+    if (minute < 5) {
+      const season = await seasonStartAt(env);
+      if (season !== null) try { console.log("qualify", JSON.stringify(await qualify(env, Date.now(), season))); } catch (e: any) { console.log("qualify", String(e?.message || e)); }
+    }
     if (minute % 15 < 5) {
       try { await refreshSocietyFeed(env); } catch (e: any) { console.log("society feed", String(e?.message || e)); }
       try { console.log("census", JSON.stringify(await refreshCensus(env))); } catch (e: any) { console.log("census", String(e?.message || e)); }

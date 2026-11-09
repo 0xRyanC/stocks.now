@@ -142,3 +142,20 @@ export async function readPools(fetcher: typeof fetch = fetch, only?: string[]):
   }
   throw new Error("no Base RPC answered: " + lastErr);
 }
+
+/** The 1F916 token on Base (18 decimals). */
+export const TOKEN_1F916 = "0x9e00fc92493451eba1c63dd3880d68b622037ba3";
+
+/** An ERC-20 balance, in whole tokens (rounded down), read through the public RPCs. Null if none answered. */
+export async function tokenBalance(token: string, holder: string, decimals = 18, fetcher: typeof fetch = fetch): Promise<number | null> {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(holder)) return null;
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: token, data: "0x" + SEL.balanceOf + addrWord(holder) }, "latest"] });
+  for (const rpc of RPCS) {
+    try {
+      const r = await fetcher(rpc, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(5000) });
+      const j = (await r.json()) as any;
+      if (typeof j?.result === "string" && j.result.length >= 3) return Number(BigInt(j.result) / 10n ** BigInt(decimals));
+    } catch { /* next RPC */ }
+  }
+  return null;
+}
